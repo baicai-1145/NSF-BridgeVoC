@@ -1,0 +1,46 @@
+cd ../..
+CUDA_VISIBLE_DEVICES=2,3 python train.py --mode sin-bridge \
+                                         --backbone_bridge bcd \
+                                         --sde bridgegan \
+                                         --max_steps 10000 \
+                                         --dataset_name Libritts \
+                                         --raw_wavfile_path /data4/liandong/datasets/LibriTTS/LibriTTS \
+                                         --train_data_dir /data4/liandong/PROJECTS/BridgeVoc-open/Datascp/LibriTTS/train-full.txt \
+                                         --val_data_dir /data4/liandong/PROJECTS/BridgeVoc-open/Datascp/LibriTTS/val-full.txt \
+                                         --batch_size 4 \
+                                         --sampling_rate 24000 \
+                                         --n_fft 1024 \
+                                         --num_mels 100 \
+                                         --hop_size 256 \
+                                         --win_size 1024 \
+                                         --fmax 12000 \
+                                         --num_frames 128 \
+                                         --num_workers 4 \
+                                         --spec_factor 0.33 \
+                                         --spec_abs_exponent 0.5 \
+                                         --normalize \
+                                         --nblocks 8 \
+                                         --hidden_channel 256 \
+                                         --f_kernel_size 9 \
+                                         --t_kernel_size 11 \
+                                         --mlp_ratio 1 \
+                                         --ada_rank 32 \
+                                         --ada_alpha 32 \
+                                         --ada_mode sola \
+                                         --use_adanorm \
+                                         --opt_type AdamW \
+                                         --lr 0.00008 \
+                                         --teacher_ckp_path /data4/liandong/PROJECTS/BridgeVoc-open/ckpt/Libritts/pretrained/bridgevoc_bcd_libritts.ckpt \
+                                         --teacher_inference_N 16 \
+                                         --loss_type_list multi-mel:0.1 \
+                                         --distill_loss_type_list distill,inverse,consistency \
+                                         --use_omni_for_distill \
+                                         --use_gan  \
+                                         --beta_min 0.01 \
+                                         --beta_max 20.0 \
+                                         --c 0.4 \
+                                         --k 2.6 \
+                                         --bridge_type gmax \
+                                         --N 4 \
+                                         --sampling_type sde_first_order
+                                    

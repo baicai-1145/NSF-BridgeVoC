@@ -1,5 +1,5 @@
 # BridgeVoC
-This is the repository for the work "BridgeVoC: Revitalizing Neural Vocoder from a Restoration Perspective". Our conference work has been accepted by IJCAI 2025, and the extension manuscript has been submitted to IEEE Transactions on Pattern Analysis and Machine Intelligence.
+This is the repository for the work "BridgeVoC: Revitalizing Neural Vocoder from a Restoration Perspective". Our conference work has been accepted by IJCAI 2025, and the extended manuscript has been submitted to IEEE Transactions on Pattern Analysis and Machine Intelligence.
 
 ### Authors: Andong Li, Tong Lei, Rilin Chen, Kai Li, Meng Yu, Xiaodong Li, Dong Yu, and Chengshi Zheng
 

@@ -135,6 +135,24 @@ cd starts/train
 ./train_bridgevoc_single_step.sh
 ```
 
+### Rank Analysis
+<div style="margin: 20px 0;">
+  <h4>🎯 Bubble Figure on LibriTTS Benchmark</h4>
+  <img src="./figure/rank_analysis.png" width="100%" height="auto" style="border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+</div>
+
+### Overall Framework
+<div style="margin: 20px 0;">
+  <h4>🎯 Bubble Figure on LibriTTS Benchmark</h4>
+  <img src="./figure/overall_framework.png" width="100%" height="auto" style="border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+</div>
+
+### Single-step Distillation Framework
+<div style="margin: 20px 0;">
+  <h4>🎯 Bubble Figure on LibriTTS Benchmark</h4>
+  <img src="./figure/single_step_distillation.png" width="100%" height="auto" style="border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+</div>
+
 ## 📊 Experimental Results
 
 ### Performance Comparison
@@ -153,7 +171,7 @@ cd starts/train
     <img src="./figure/performance_ljs.png" width="50%" height="auto" style="border-radius: 8px;">
   </div>
   <div>
-    <h4>📈 On Out-of-Distributions Benchmarks</h4>
+    <h4>📈 On Out-of-Distribution Benchmarks</h4>
     <img src="./figure/performance_otf.png" width="100%" height="auto" style="border-radius: 8px;">
   </div>
 </div>

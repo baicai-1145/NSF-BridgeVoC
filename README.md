@@ -32,7 +32,7 @@ process. This hurdle can heavily hinder the development of this field. To addres
   
   <div style="background: #f8f9fa; padding: 20px; border-radius: 10px; border-left: 4px solid #2ecc71;">
     <h3>🎧 Impressive performance-inference balance</h3>
-    <p> The best vocoder performance up to now (e.g., PESQ 4.4+ for NFE=4 and PESQ 4.3+ for NFE=1), support for both few- (NFE=4) and single-step setups.</p>
+    <p> This might be the best vocoder performance up to now (e.g., PESQ 4.4+ for NFE=4 and PESQ 4.3+ for NFE=1), support for both few- (NFE=4) and single-step setups.</p>
   </div>
 </div>
 
@@ -178,8 +178,22 @@ cd starts/train
 
 ### Performance vs. Inference Cost
 <div style="margin: 20px 0;">
-  <h4>🎯 Performance and Inference under different NFEsk</h4>
+  <h4>🎯 Performance and Inference under different NFEs</h4>
   <img src="./figure/Inference_Cost.png" width="100%" height="auto" style="border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+</div>
+
+### Performance scaling with DiT backbones
+#### Our method is the first to surpass 4.50 in PESQ when only scaling to 29.18 M, and also notably outperforms DiT with ~0.36B parameters
+#### We also support for edge-device processing, with the parameters as few as 0.19 M • 1.60 GMACs/5s per NFE
+<div style="margin: 20px 0;">
+  <h4>🎯 Performance scaling effect</h4>
+  <img src="./figure/Scaling_DiT.png" width="100%" height="auto" style="border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+</div>
+
+### Performance in causal setting
+<div style="margin: 20px 0;">
+  <h4>🎯 Performance for causal setup</h4>
+  <img src="./figure/BridgeVoC_causal.png" width="100%" height="auto" style="border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
 </div>
 
 

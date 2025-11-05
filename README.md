@@ -45,7 +45,7 @@ Pre-trained models are available on Hugging Face:
 | Model Name                   | Dataset | Sample Rate | NMel | Training Steps |
 |------------------------------|---------|-------------|------|----------------|
 | 🤗 [BridgeVoC-LibriTTS](https://huggingface.co/AndongLi/BridgeVoC/blob/main/ckpt/Libritts/pretrained/bridgevoc_bcd_libritts_24k_fmax12k_nmel100.pt) | LibriTTS | 24k Hz | 100 | 1M Generator + 0.5M Discriminator |
-| 🤗 [BridgeVoC-single-step-LibriTTS](https://huggingface.co/AndongLi/BridgeVoC/blob/main/ckpt/Libritts/pretrained/bridgevoc_bcd_single_libritts_24k_fmax12k_nmel100.pt) | LibriTTS | 24k Hz | 100 | 1M Generator + 0.5M Discriminator |
+| 🤗 [BridgeVoC-single-step-LibriTTS](https://huggingface.co/AndongLi/BridgeVoC/blob/main/ckpt/Libritts/pretrained/bridgevoc_bcd_single_libritts_24k_fmax12k_nmel100.pt) | LibriTTS | 24k Hz | 100 | 10k Generator + 5k Discriminator |
 | 🤗 [BridgeVoC-LJSpeech](https://huggingface.co/AndongLi/BridgeVoC/blob/main/ckpt/LJS/pretrained/bridgevoc_bcd_ljs_22_05k_fmax_8k_nmel80.pt) | LJSpeech | 22.05k Hz | 80 | 1M Generator + 0.5M Discriminator |
 
 

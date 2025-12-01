@@ -1,0 +1,74 @@
+mode: bridge-only
+backbone_bridge: bcd
+sde: bridgegan
+
+# ---- dataset & experiment ----
+dataset_name: Libritts
+raw_wavfile_path: /path/to/LibriTTS/LibriTTS        # TODO: 修改为你本机的 LibriTTS 根目录
+train_data_dir: ./Datascp/LibriTTS/train-full.txt   # TODO: 准备或修改成你的训练清单
+val_data_dir: ./Datascp/LibriTTS/val-full.txt       # TODO: 准备或修改成你的验证清单
+max_steps: 1000000
+max_epochs: 3100
+fix_seed: false
+nolog: false
+logstdout: false
+
+ScoreModelGAN:
+  opt_type: AdamW
+  lr: 0.0005
+  beta1: 0.8
+  beta2: 0.99
+  ema_decay: 0.999
+  t_eps: 0.03
+  num_eval_files: 20
+  loss_type_list: "score_mse:1.0,multi-mel:0.1"
+  use_gan: true
+
+SDE:
+  beta_min: 0.01
+  beta_max: 20.0
+  c: 0.4
+  k: 2.6
+  bridge_type: gmax
+  N: 4
+  sampling_type: sde_first_order
+
+BackboneScore:
+  nblocks: 8
+  hidden_channel: 256
+  f_kernel_size: 9
+  t_kernel_size: 11
+  mlp_ratio: 1
+  ada_rank: 32
+  ada_alpha: 32
+  ada_mode: sola
+  use_adanorm: true
+  act_type: gelu
+  pe_type: positional
+  scale: 1000
+  decode_type: ri
+  causal: false
+
+DataModule:
+  batch_size: 4
+  sampling_rate: 24000
+  n_fft: 1024
+  num_mels: 100
+  hop_size: 256
+  win_size: 1024
+  fmin: 0
+  fmax: 12000
+  num_frames: 256
+  phase_init: zero
+  num_workers: 4
+  spec_factor: 0.33
+  spec_abs_exponent: 0.5
+  normalize: true
+  transform_type: exponent
+  drop_last_freq: true
+
+Trainer:
+  accelerator: gpu
+  gpus: "auto"
+  accumulate_grad_batches: 1
+

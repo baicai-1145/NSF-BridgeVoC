@@ -12,23 +12,23 @@ class BCD(nn.Module):
 
    @staticmethod
    def add_argparse_args(parser):
-      parser.add_argument("--nblocks", type=int, required=True, default=8,
+      parser.add_argument("--nblocks", type=int, default=8,
                           help="The number of Conv2Former blocks, 6 for tiny, 8 for mid and 16 for large.")
       parser.add_argument("--input_channel", type=int, required=False, default=4,
                           help="The number of input channels.")
-      parser.add_argument("--hidden_channel", type=int, required=True, default=256,
+      parser.add_argument("--hidden_channel", type=int, default=256,
                           help="The number of hidden channels, 32 for tiny, 256 for mid, and 384 for large.")
-      parser.add_argument("--f_kernel_size", type=int, required=True, default=9,
+      parser.add_argument("--f_kernel_size", type=int, default=9,
                           help="Kernel size along the sub-band axis.")
-      parser.add_argument("--t_kernel_size", type=int, required=True, default=11,
+      parser.add_argument("--t_kernel_size", type=int, default=11,
                           help="Kernel size along the frame axis.")
-      parser.add_argument("--mlp_ratio", type=int, required=True, default=1,
+      parser.add_argument("--mlp_ratio", type=int, default=1,
                           help="MLP ratio for expansion.")
-      parser.add_argument("--ada_rank", type=int, required=True, default=32,
+      parser.add_argument("--ada_rank", type=int, default=32,
                           help="Lora rank for ada-sola, 8 for tiny, 32 for mid, and 48 for large.")
-      parser.add_argument("--ada_alpha", type=int, required=True, default=32,
+      parser.add_argument("--ada_alpha", type=int, default=32,
                           help="Lora alpha for ada-sola, 8 for tiny, 32 for mid, and 48 for large.")
-      parser.add_argument("--ada_mode", type=str, required=True, default="sola",
+      parser.add_argument("--ada_mode", type=str, default="sola",
                           help="AdaLN mode.")
       parser.add_argument("--act_type", type=str, required=False, default="gelu",
                           help="Activation type.")
@@ -60,6 +60,7 @@ class BCD(nn.Module):
                 decode_type: str = "ri",
                 use_adanorm: bool = True,
                 causal: bool = False,
+                sampling_rate: int = 24000,
                 **unused_kwargs,
                 ):
       super(BCD, self).__init__()
@@ -78,17 +79,31 @@ class BCD(nn.Module):
       self.decode_type = decode_type
       self.use_adanorm = use_adanorm
       self.causal = causal
+      self.sampling_rate = sampling_rate
 
-      self.enc = SharedBandSplit_NB24_24k(input_channel=self.input_channel,
-                                          feature_dim=self.hidden_channel,
-                                          use_adanorm=self.use_adanorm,
-                                          causal=self.causal,
-                                          )
+      if self.sampling_rate > 24000:
+         self.enc = SharedBandSplit_NB48_HighSR(input_channel=self.input_channel,
+                                                feature_dim=self.hidden_channel,
+                                                use_adanorm=self.use_adanorm,
+                                                causal=self.causal,
+                                                )
+      else:
+         self.enc = SharedBandSplit_NB24_24k(input_channel=self.input_channel,
+                                             feature_dim=self.hidden_channel,
+                                             use_adanorm=self.use_adanorm,
+                                             causal=self.causal,
+                                             )
       self.nband = self.enc.get_nband()
-      self.dec = SharedBandMerge_NB24_24k(nband=self.nband,
-                                          feature_dim=self.hidden_channel,
-                                          use_adanorm=self.use_adanorm,
-                                          decode_type=self.decode_type)
+      if self.sampling_rate > 24000:
+         self.dec = SharedBandMerge_NB48_HighSR(nband=self.nband,
+                                                feature_dim=self.hidden_channel,
+                                                use_adanorm=self.use_adanorm,
+                                                decode_type=self.decode_type)
+      else:
+         self.dec = SharedBandMerge_NB24_24k(nband=self.nband,
+                                             feature_dim=self.hidden_channel,
+                                             use_adanorm=self.use_adanorm,
+                                             decode_type=self.decode_type)
 
       self.main_net = Conv2FormerNet(nband=self.nband,
                                     nblocks=self.nblocks,
@@ -120,7 +135,9 @@ class BCD(nn.Module):
          else:
             self.time_ada_nn = None
 
-      self.alpha = nn.Parameter(1e-4 * torch.ones([1, self.hidden_channel, self.nband, 1]))
+      self.alpha = nn.Parameter(torch.ones([1, self.hidden_channel, self.nband, 1]))
+      with torch.no_grad():
+         self.alpha.mul_(1e-4)
 
       self.initialize_weights()
 

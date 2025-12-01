@@ -1,0 +1,34 @@
+cd ../..
+CUDA_VISIBLE_DEVICES=0 python enhancement.py --raw_wav_path /data4/xxx/datasets/Your48kDataset/wavs \
+                                             --test_dir /data4/xxx/datasets/Your48kDataset/test \
+                                             --enhanced_dir ./test_decode/48k/bridgevoc \
+                                             --ckpt ./ckpt/Your48k/pretrained/bridgevoc_bcd_48k.pt \
+                                             --sde_name bridgegan \
+                                             --backbone bcd \
+                                             --device cuda \
+                                             --nblocks 8 \
+                                             --hidden_channel 256 \
+                                             --f_kernel_size 9 \
+                                             --t_kernel_size 11 \
+                                             --mlp_ratio 1 \
+                                             --ada_rank 32 \
+                                             --ada_alpha 32 \
+                                             --use_adanorm \
+                                             --sampling_rate 48000 \
+                                             --n_fft 2048 \
+                                             --num_mels 256 \
+                                             --hop_size 512 \
+                                             --win_size 2048 \
+                                             --fmin 0 \
+                                             --fmax 24000 \
+                                             --phase_init zero \
+                                             --spec_factor 0.33 \
+                                             --spec_abs_exponent 0.5 \
+                                             --normalize \
+                                             --transform_type exponent \
+                                             --drop_last_freq \
+                                             --beta_min 0.01 \
+                                             --beta_max 20 \
+                                             --bridge_type gmax \
+                                             --N 4 \
+                                             --sampling_type sde_first_order

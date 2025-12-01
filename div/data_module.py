@@ -286,39 +286,39 @@ class Specs(Dataset):
 class SpecsDataModule(pl.LightningDataModule):
     @staticmethod
     def add_argparse_args(parser):
-        parser.add_argument("--dataset_name", type=str, required=True, default="LibriTTS",
+        parser.add_argument("--dataset_name", type=str, default="LibriTTS",
                             help="Name of the used dataset, for example, LJSpeech, LibriTTS...")
-        parser.add_argument("--raw_wavfile_path", type=str, required=True, default="", 
+        parser.add_argument("--raw_wavfile_path", type=str, default="", 
                             help="The base directory of the raw wavfiles.")
-        parser.add_argument("--train_data_dir", type=str, required=True, default="",
+        parser.add_argument("--train_data_dir", type=str, default="",
                              help="The scp path of the training dataset")
-        parser.add_argument("--val_data_dir", type=str, required=True, default="", 
+        parser.add_argument("--val_data_dir", type=str, default="", 
                             help="The scp path of the validation dataset")
-        parser.add_argument("--batch_size", type=int, required=True, default=16, 
+        parser.add_argument("--batch_size", type=int, default=16, 
                             help="The batch size. 8 by default.")
-        parser.add_argument("--sampling_rate", type=int, required=True, default=24000, 
+        parser.add_argument("--sampling_rate", type=int, default=24000, 
                             help="Sampling rate.")
-        parser.add_argument("--n_fft", type=int, required=True, default=1024, 
+        parser.add_argument("--n_fft", type=int, default=1024, 
                             help="Number of FFT bins.")   # to assure 256 freq bins
-        parser.add_argument("--num_mels", type=int, required=True, default=100, 
+        parser.add_argument("--num_mels", type=int, default=100, 
                             help="Number of mels.")
-        parser.add_argument("--hop_size", type=int, required=True, default=256, 
+        parser.add_argument("--hop_size", type=int, default=256, 
                             help="Window hop length. 128 by default.")
-        parser.add_argument("--win_size", type=int, required=True, default=1024, 
+        parser.add_argument("--win_size", type=int, default=1024, 
                             help="Window size, 1024 by default.")
         parser.add_argument("--fmin", type=int, default=0, 
                             help="Minimum frequency for mel conversion.")
-        parser.add_argument("--fmax", type=int, required=True, default=12000, 
+        parser.add_argument("--fmax", type=int, default=12000, 
                             help="Maximum frequency for mel conversion.")
-        parser.add_argument("--num_frames", type=int, required=True, default=256, 
+        parser.add_argument("--num_frames", type=int, default=256, 
                             help="Number of frames for the dataset. 256 by default.")
         parser.add_argument("--phase_init", type=str, choices=["random", "zero"], default="zero", 
                             help="Phase initization method.")
-        parser.add_argument("--num_workers", type=int, required=True, default=4, 
+        parser.add_argument("--num_workers", type=int, default=4, 
                             help="Number of workers to use for DataLoaders. 4 by default.")
-        parser.add_argument("--spec_factor", type=float, required=True, default=0.33, 
+        parser.add_argument("--spec_factor", type=float, default=0.33, 
                             help="Factor to multiply complex STFT coefficients by. 0.33 by default.")
-        parser.add_argument("--spec_abs_exponent", type=float, required=True, default=0.5, 
+        parser.add_argument("--spec_abs_exponent", type=float, default=0.5, 
                             help="Exponent e for the transformation abs(z)**e * exp(1j*angle(z)). 0.5 by default.")
         parser.add_argument("--normalize", action="store_true", 
                             help="Whether to apoply the normalization strategy.")

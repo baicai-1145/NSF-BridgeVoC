@@ -18,9 +18,9 @@ torch.autograd.set_detect_anomaly(True)
 class ScoreModelGAN(pl.LightningModule):
     @staticmethod
     def add_argparse_args(parser):
-        parser.add_argument("--opt_type", type=str, choices=['Adam', 'AdamW'], required=True, default='AdamW',
+        parser.add_argument("--opt_type", type=str, choices=['Adam', 'AdamW'], default='AdamW',
                             help='The optimizer type.')
-        parser.add_argument("--lr", type=float, required=True, default=5e-4, 
+        parser.add_argument("--lr", type=float, default=5e-4, 
                             help="The learning rate (5e-4 by default)")
         parser.add_argument("--beta1", type=float, default=0.8,
                             help="Beta1 for Adam/AdamW.")
@@ -32,7 +32,7 @@ class ScoreModelGAN(pl.LightningModule):
                             help="The minimum process time (0.03 by default)")
         parser.add_argument("--num_eval_files", type=int, default=20,
                             help="Number of files for speech enhancement performance evaluation during training. Pass 0 to turn off (no checkpoints based on evaluation metrics will be generated).")
-        parser.add_argument("--loss_type_list", type=str, required=True, default="score_mse:1.0",
+        parser.add_argument("--loss_type_list", type=str, default="score_mse:1.0",
                             help="The type of loss functions to use.")
         parser.add_argument("--use_gan", action="store_true",
                             help="Whether to use adversarial loss.")

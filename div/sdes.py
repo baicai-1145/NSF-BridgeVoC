@@ -167,14 +167,14 @@ class OUVESDE(SDE):
             help="The number of timesteps in the SDE discretization. 1000 by default")
         parser.add_argument("--theta", type=float, default=1.5, 
             help="The constant stiffness of the Ornstein-Uhlenbeck process.")
-        parser.add_argument("--sigma-min", type=float, required=True, default=0.05, 
+        parser.add_argument("--sigma-min", type=float, default=0.05, 
             help="The minimum sigma to use.")
-        parser.add_argument("--sigma-max", type=float, required=True, default=0.5, 
+        parser.add_argument("--sigma-max", type=float, default=0.5, 
             help="The maximum sigma to use.")
-        parser.add_argument("--snr", type=float, required=True, default=0.5)
-        parser.add_argument("--reverse_n", type=int, required=True, default=10,
+        parser.add_argument("--snr", type=float, default=0.5)
+        parser.add_argument("--reverse_n", type=int, default=10,
             help="Timesteps for reverse.")
-        parser.add_argument("--corrector_steps", type=int, required=True, default=1,
+        parser.add_argument("--corrector_steps", type=int, default=1,
             help="Steps for corrector.")
         return parser
 
@@ -271,18 +271,18 @@ class OUVESDE(SDE):
 class BridgeGAN(SDE, nn.Module):
     @staticmethod
     def add_argparse_args(parser):
-        parser.add_argument("--beta_min", type=float, required=True, default=0.01,
+        parser.add_argument("--beta_min", type=float, default=0.01,
                             help="Beta min")
-        parser.add_argument("--beta_max", type=float, required=True, default=20,
+        parser.add_argument("--beta_max", type=float, default=20,
                             help="Beta max")
-        parser.add_argument("--c", type=float, required=True, default=0.4,
+        parser.add_argument("--c", type=float, default=0.4,
                             help="Noise scheduler parameter.")
-        parser.add_argument("--k", type=float, required=True, default=2.6,
+        parser.add_argument("--k", type=float, default=2.6,
                             help="Noise scheduler parameter.")
-        parser.add_argument("--bridge_type", type=str, required=True, default="gmax",
+        parser.add_argument("--bridge_type", type=str, default="gmax",
                             choices=["vp", "ve", "gmax"],
                             help="Type of bridge diffusion.")
-        parser.add_argument("--N", type=int, required=True, default=4,
+        parser.add_argument("--N", type=int, default=4,
                             help="Number of sampling in the reverse.")
         parser.add_argument("--offset", type=float, default=1e-5,
                             help="Offset for time discrete.")

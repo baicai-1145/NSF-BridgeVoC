@@ -1,0 +1,43 @@
+raw_wav_path: ./data/train/audio             # 要解码的 wav 根目录
+test_dir: ./data/train/val.txt    # 验证/测试清单或目录
+enhanced_dir: ./test_decode/44k1/bridgevoc   # 输出目录
+ckpt: ./ckpt/Libritts/mode_bridge-only_sde_BridgeGAN_backbone_bcd_sde_type_gmax_c_0.4_k_2.6_beta_max_20.0_s_c_o_r_e___m_s_e___1_._0___m_u_l_t_i_-_m_e_l___0_._1/version_0/checkpoints/epoch=0-periodicity=0.0000-v2.ckpt
+
+sde_name: bridgegan
+backbone: bcd
+device: cuda
+
+# 网络结构（需与训练时一致）
+nblocks: 8
+hidden_channel: 256
+f_kernel_size: 9
+t_kernel_size: 11
+mlp_ratio: 1
+ada_rank: 32
+ada_alpha: 32
+use_adanorm: true
+causal: false
+
+# STFT / mel 配置（需与训练时一致）
+sampling_rate: 44100
+n_fft: 2048
+num_mels: 256
+hop_size: 512
+win_size: 2048
+fmin: 0
+fmax: 22050
+phase_init: zero
+spec_factor: 0.33
+spec_abs_exponent: 0.5
+normalize: true
+transform_type: exponent
+drop_last_freq: true
+
+# SDE 采样相关
+beta_min: 0.01
+beta_max: 20.0
+c: 0.4
+k: 2.6
+bridge_type: gmax
+N: 4
+sampling_type: sde_first_order

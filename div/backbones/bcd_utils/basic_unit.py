@@ -464,3 +464,182 @@ class SharedBandMerge_NB24_24k(nn.Module):
          last_real, last_imag = real[..., -1, :].unsqueeze(-2), imag[..., -1, :].unsqueeze(-2)
          real, imag = torch.cat([real, last_real], dim=-2), torch.cat([imag, last_imag], dim=-2)
          return real, imag
+
+
+class SharedBandSplit_NB48_HighSR(nn.Module):
+   def __init__(self,
+                input_channel: int = 4,
+                feature_dim: int = 64,
+                use_adanorm: bool = False,
+                causal: bool = True,
+               ):
+      super(SharedBandSplit_NB48_HighSR, self).__init__()
+      self.input_channel = input_channel
+      self.feature_dim = feature_dim
+      self.use_adanorm = use_adanorm
+      self.causal = causal
+      self.eps = torch.finfo(torch.float32).eps
+
+      if self.causal:
+         pad = nn.ConstantPad2d([2, 0, 0, 0], value=0.)
+      else:
+         pad = nn.ConstantPad2d([1, 1, 0, 0], value=0.)
+
+      self.reg1_encoder = nn.Sequential(
+          pad,
+          nn.Conv2d(in_channels=self.input_channel, out_channels=self.feature_dim, kernel_size=(12, 3), stride=(12, 1)),
+          BandwiseC2LayerNorm(nband=24, feature_dim=self.feature_dim)
+      )
+      self.reg2_encoder = nn.Sequential(
+          pad,
+          nn.Conv2d(in_channels=self.input_channel, out_channels=self.feature_dim, kernel_size=(24, 3), stride=(24, 1)),
+          BandwiseC2LayerNorm(nband=16, feature_dim=self.feature_dim)
+      )
+      self.reg3_encoder = nn.Sequential(
+          pad,
+          nn.Conv2d(in_channels=self.input_channel, out_channels=self.feature_dim, kernel_size=(44, 3), stride=(44, 1)),
+          BandwiseC2LayerNorm(nband=8, feature_dim=self.feature_dim)
+      )
+      self.nband = 24 + 16 + 8
+      print(f'Totally splitting {self.nband} bands for high sampling rate (e.g., 44.1k/48k).')
+
+   def get_nband(self):
+      return self.nband
+
+   def forward(self, input=None, time_ada_begin=None):
+      """
+      input: (B, 4, F, T), F ~= 1024 after drop_last_freq
+      return: (B, C, nband, T)
+      """
+      batch_size = input.shape[0]
+      x1, x2, x3 = input[..., :288, :], input[..., 288:672, :], input[..., 672:, :]
+      y1, y2, y3 = self.reg1_encoder(x1), self.reg2_encoder(x2), self.reg3_encoder(x3)
+
+      out = torch.cat([y1, y2, y3], dim=-2)
+
+      if self.use_adanorm:
+         shift, scale = time_ada_begin.reshape(batch_size, 2, -1).chunk(2, dim=1)
+         shift, scale = shift.squeeze(1), scale.squeeze(1)
+         out = film_modulate(out, shift, scale)
+
+      return out
+
+
+class SharedBandMerge_NB48_HighSR(nn.Module):
+   def __init__(self,
+                nband: int,
+                feature_dim: int = 64,
+                use_adanorm: bool = False,
+                decode_type: str = 'mag+phase',
+               ):
+      super(SharedBandMerge_NB48_HighSR, self).__init__()
+      self.nband = nband
+      self.feature_dim = feature_dim
+      self.use_adanorm = use_adanorm
+      self.decode_type = decode_type
+      self.eps = torch.finfo(torch.float32).eps
+
+      self.norm1 = BandwiseC2LayerNorm(nband=self.nband, feature_dim=self.feature_dim)
+      self.norm2 = BandwiseC2LayerNorm(nband=self.nband, feature_dim=self.feature_dim)
+      if self.decode_type.lower() == "mag+phase":
+         self.reg1_mag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(12, 1), stride=(12, 1))
+         )
+         self.reg2_mag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(24, 1), stride=(24, 1))
+         )
+         self.reg3_mag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(44, 1), stride=(44, 1))
+         )
+         self.reg1_phase_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(12, 1), stride=(12, 1))
+         )
+         self.reg2_phase_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(24, 1), stride=(24, 1))
+         )
+         self.reg3_phase_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(44, 1), stride=(44, 1))
+         )
+      elif self.decode_type.lower() == "ri":
+         self.reg1_real_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(12, 1), stride=(12, 1))
+         )
+         self.reg2_real_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(24, 1), stride=(24, 1))
+         )
+         self.reg3_real_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(44, 1), stride=(44, 1))
+         )
+         self.reg1_imag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(12, 1), stride=(12, 1))
+         )
+         self.reg2_imag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(24, 1), stride=(24, 1))
+         )
+         self.reg3_imag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(44, 1), stride=(44, 1))
+         )
+      else:
+         raise NotImplementedError("Only Mag+Phase and RI are supported for decoding!")
+
+   def forward(self, emb_input, time_ada_final1=None, time_ada_final2=None):
+      """
+      emb_input: (B, C, nband, T)
+      return:
+         mag: (B, F, T)
+         phase: (B, F, T)
+      """
+      batch_size = emb_input.shape[0]
+      emb_input1, emb_input2 = self.norm1(emb_input), self.norm2(emb_input)
+      if self.use_adanorm:
+         shift1, scale1 = time_ada_final1.reshape(batch_size, 2, -1).chunk(2, dim=1)
+         shift1, scale1 = shift1.squeeze(1), scale1.squeeze(1)
+         emb_input1 = film_modulate(emb_input1, shift1, scale1)
+         shift2, scale2 = time_ada_final2.reshape(batch_size, 2, -1).chunk(2, dim=1)
+         shift2, scale2 = shift2.squeeze(1), scale2.squeeze(1)
+         emb_input2 = film_modulate(emb_input2, shift2, scale2)
+
+      x1_1, x1_2, x1_3 = emb_input1[:, :, :24].contiguous(), \
+                         emb_input1[:, :, 24:40].contiguous(), \
+                         emb_input1[:, :, 40:].contiguous()
+      x2_1, x2_2, x2_3 = emb_input2[:, :, :24].contiguous(), \
+                         emb_input2[:, :, 24:40].contiguous(), \
+                         emb_input2[:, :, 40:].contiguous()
+
+      if self.decode_type.lower() == "mag+phase":
+         mag1, mag2, mag3 = self.reg1_mag_decoder(x1_1), self.reg2_mag_decoder(x1_2), self.reg3_mag_decoder(x1_3)
+         com1, com2, com3 = self.reg1_phase_decoder(x2_1), self.reg2_phase_decoder(x2_2), self.reg3_phase_decoder(x2_3)
+         mag = torch.cat([mag1, mag2, mag3], dim=-2)
+         com = torch.cat([com1, com2, com3], dim=-2)
+         pha = torch.atan2(com[:, -1], com[:, 0])
+         return torch.exp(mag.squeeze(1)), pha
+      elif self.decode_type.lower() == "ri":
+         real1, real2, real3 = self.reg1_real_decoder(x1_1), self.reg2_real_decoder(x1_2), self.reg3_real_decoder(x1_3)
+         imag1, imag2, imag3 = self.reg1_imag_decoder(x2_1), self.reg2_imag_decoder(x2_2), self.reg3_imag_decoder(x2_3)
+         real = torch.cat([real1, real2, real3], dim=-2)
+         imag = torch.cat([imag1, imag2, imag3], dim=-2)
+         return real, imag

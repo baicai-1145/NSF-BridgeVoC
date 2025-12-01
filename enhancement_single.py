@@ -13,6 +13,23 @@ from div.backbones.shared import BackboneRegistry
 from div.sdes import SDERegistry
 from div.data_module import mel_spectrogram, inverse_mel
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+def _safe_torch_load(path, map_location="cpu"):
+    """
+    Helper to load checkpoints safely across PyTorch versions.
+    For PyTorch>=2.6, explicitly set weights_only=False for backward compatibility.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        # Older PyTorch without weights_only argument
+        return torch.load(path, map_location=map_location)
+
 def spec_fwd(spec, transform_type, spec_factor, spec_abs_exponent):
     if transform_type == "exponent":
         if spec_abs_exponent != 1:
@@ -41,52 +58,54 @@ def spec_back(spec, transform_type, spec_factor, spec_abs_exponent):
 
 if __name__ == '__main__':
     parser = ArgumentParser()
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to YAML config file for single-step inference; CLI args override values from config.")
     parser.add_argument("--use_mel_load", action="store_true",
                         help="Whether to load mel.npy for generation.")
-    parser.add_argument("--raw_wav_path", type=str, required=True, default="",
+    parser.add_argument("--raw_wav_path", type=str, default="",
                         help='Directory of the raw wavfile')
-    parser.add_argument("--test_dir", type=str, required=True, default="", 
+    parser.add_argument("--test_dir", type=str, default="", 
                         help='Directory containing the test data')
-    parser.add_argument("--enhanced_dir", type=str, required=True, default="",
+    parser.add_argument("--enhanced_dir", type=str, default="",
                         help='Directory containing the enhanced data')
-    parser.add_argument("--ckpt", type=str, required=True, default="",
+    parser.add_argument("--ckpt", type=str, default="",
                         help='Path to model checkpoint')
-    parser.add_argument("--sde_name", type=str, required=True, default="bridgegan", help="The type of the diffuion")
-    parser.add_argument("--backbone", type=str, required=True, default="bcd", help="The type of the network backbone")
-    parser.add_argument("--device", type=str, required=True, default="cuda", help="Device to use for inference")
+    parser.add_argument("--sde_name", type=str, default="bridgegan", help="The type of the diffuion")
+    parser.add_argument("--backbone", type=str, default="bcd", help="The type of the network backbone")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use for inference")
     # network params
-    parser.add_argument("--nblocks", type=int, required=True, default=8,
+    parser.add_argument("--nblocks", type=int, default=8,
                           help="The number of Conv2Former blocks, 6 for tiny, 8 for mid and 16 for large.")
-    parser.add_argument("--hidden_channel", type=int, required=True, default=256,
+    parser.add_argument("--hidden_channel", type=int, default=256,
                         help="The number of hidden channels, 32 for tiny, 256 for mid, and 384 for large.")
-    parser.add_argument("--f_kernel_size", type=int, required=True, default=9,
+    parser.add_argument("--f_kernel_size", type=int, default=9,
                         help="Kernel size along the sub-band axis.")
-    parser.add_argument("--t_kernel_size", type=int, required=True, default=11,
+    parser.add_argument("--t_kernel_size", type=int, default=11,
                         help="Kernel size along the frame axis.")
-    parser.add_argument("--mlp_ratio", type=int, required=True, default=1,
+    parser.add_argument("--mlp_ratio", type=int, default=1,
                         help="MLP ratio for expansion.")
-    parser.add_argument("--ada_rank", type=int, required=True, default=32,
+    parser.add_argument("--ada_rank", type=int, default=32,
                         help="Lora rank for ada-sola, 8 for tiny, 32 for mid, and 48 for large.")
-    parser.add_argument("--ada_alpha", type=int, required=True, default=32,
+    parser.add_argument("--ada_alpha", type=int, default=32,
                         help="Lora alpha for ada-sola, 8 for tiny, 32 for mid, and 48 for large.")
     parser.add_argument("--use_adanorm", action="store_true",
                         help="Whether to use AdaNorm strategy.")
     parser.add_argument("--causal", action="store_true",
                         help="Whether to use causal network setups.")
     # preprocess params
-    parser.add_argument("--sampling_rate", type=int, required=True, default=24000, 
+    parser.add_argument("--sampling_rate", type=int, default=24000, 
                         help="Sampling rate.")
-    parser.add_argument("--n_fft", type=int, required=True, default=1024, 
+    parser.add_argument("--n_fft", type=int, default=1024, 
                         help="Number of FFT bins.")
-    parser.add_argument("--num_mels", type=int, required=True, default=100, 
+    parser.add_argument("--num_mels", type=int, default=100, 
                         help="Number of mels.")
-    parser.add_argument("--hop_size", type=int, required=True, default=256,
+    parser.add_argument("--hop_size", type=int, default=256,
                         help="Window hop length. 128 by default.")
-    parser.add_argument("--win_size", type=int, required=True, default=1024, 
+    parser.add_argument("--win_size", type=int, default=1024, 
                         help="Window size, 1024 by default.")
     parser.add_argument("--fmin", type=int, default=0,
                         help="Minimum frequency for mel conversion.")
-    parser.add_argument("--fmax", type=int, required=True, default=12000,
+    parser.add_argument("--fmax", type=int, default=12000,
                         help="Maximum frequency for mel conversion.")
     parser.add_argument("--phase_init", type=str, choices=["random", "zero"], default="zero",
                             help="Phase initization method.")
@@ -101,17 +120,34 @@ if __name__ == '__main__':
     parser.add_argument("--drop_last_freq", action="store_true",
                         help="Whether to drop the last frequency band to meet the exp(2) requirement.")
     # SDE params
-    parser.add_argument("--beta_min", type=float, required=True, default=0.01,
+    parser.add_argument("--beta_min", type=float, default=0.01,
                             help="Beta min")
-    parser.add_argument("--beta_max", type=float, required=True, default=20,
+    parser.add_argument("--beta_max", type=float, default=20,
                         help="Beta max")
     parser.add_argument("--c", type=float, required=False, default=0.4,
                         help="Noise scheduler parameter.")
     parser.add_argument("--k", type=float, required=False, default=2.6,
                         help="Noise scheduler parameter.")
-    parser.add_argument("--bridge_type", type=str, required=True, default="gmax",
+    parser.add_argument("--bridge_type", type=str, default="gmax",
                         choices=["vp", "ve", "gmax"],
                         help="Type of bridge diffusion.")
+    # Apply YAML config defaults if provided
+    temp_args, _ = parser.parse_known_args()
+    if temp_args.config is not None:
+        if yaml is None:
+            raise ImportError("PyYAML is required when using --config. Please install it via `pip install pyyaml`.")
+        with open(temp_args.config, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        if not isinstance(cfg, dict):
+            raise ValueError("YAML config must have a mapping (dict) at the top level.")
+        defaults = {}
+        for key, value in cfg.items():
+            if isinstance(value, dict):
+                defaults.update(value)
+            else:
+                defaults[key] = value
+        parser.set_defaults(**defaults)
+
     args = parser.parse_args()
 
     # Add specific args for ScoreModel, pl.Trainer, the SDE class and backbone DNN class
@@ -122,14 +158,13 @@ if __name__ == '__main__':
     
     try:  # Method1: load .ckpt file
         nn_weights = OrderedDict()
-        ckp = torch.load(args.ckpt, map_location="cpu")["state_dict"]
+        ckp = _safe_torch_load(args.ckpt, map_location="cpu")["state_dict"]
         for k, v in ckp.items():
             if k.startswith("dnn"):
                 nn_weights[k[4:]] = v
         dnn.load_state_dict(nn_weights)
-        torch.save({"generator": nn_weights}, "/data4/liandong/PROJECTS/BridgeVoc-open/ckpt/Libritts/pretrained/bridgevoc_bcd_single_libritts_24k_fmax12k_nmel100.pt")
     except:  # Method2: load .pt file
-        model_pt = torch.load(args.ckpt, map_location="cpu")
+        model_pt = _safe_torch_load(args.ckpt, map_location="cpu")
         dnn.load_state_dict(model_pt["generator"])
 
     dnn.to(args.device)

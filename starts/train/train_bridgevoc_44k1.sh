@@ -1,0 +1,42 @@
+cd ../..
+CUDA_VISIBLE_DEVICES=2,3 python train.py --mode bridge-only \
+                                         --backbone_bridge bcd \
+                                         --sde bridgegan \
+                                         --max_steps 1000000 \
+                                         --dataset_name Libritts \
+                                         --raw_wavfile_path /data4/liandong/datasets/LibriTTS/LibriTTS \
+                                         --train_data_dir /data4/liandong/PROJECTS/BridgeVoc-open/Datascp/LibriTTS/train-full.txt \
+                                         --val_data_dir /data4/liandong/PROJECTS/BridgeVoc-open/Datascp/LibriTTS/val-full.txt \
+                                         --batch_size 4 \
+                                         --sampling_rate 44100 \
+                                         --n_fft 2048 \
+                                         --num_mels 256 \
+                                         --hop_size 512 \
+                                         --win_size 2048 \
+                                         --fmax 22050 \
+                                         --num_frames 256 \
+                                         --num_workers 4 \
+                                         --spec_factor 0.33 \
+                                         --spec_abs_exponent 0.5 \
+                                         --normalize \
+                                         --drop_last_freq \
+                                         --nblocks 8 \
+                                         --hidden_channel 256 \
+                                         --f_kernel_size 9 \
+                                         --t_kernel_size 11 \
+                                         --mlp_ratio 1 \
+                                         --ada_rank 32 \
+                                         --ada_alpha 32 \
+                                         --ada_mode sola \
+                                         --use_adanorm \
+                                         --opt_type AdamW \
+                                         --lr 0.0005 \
+                                         --loss_type_list score_mse:1.0,multi-mel:0.1 \
+                                         --use_gan  \
+                                         --beta_min 0.01 \
+                                         --beta_max 20.0 \
+                                         --c 0.4 \
+                                         --k 2.6 \
+                                         --bridge_type gmax \
+                                         --N 4 \
+                                         --sampling_type sde_first_order

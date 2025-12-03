@@ -76,6 +76,97 @@ def mel_spectrogram(
     return spec  # [batch_size,n_fft/2+1,frames]
 
 
+def _stft(x: torch.Tensor, fft_size: int, hop_size: int, win_length: int, window: torch.Tensor):
+    """
+    Perform STFT and return magnitude spectrogram.
+
+    Args:
+        x: (B, T)
+    """
+    x_stft = torch.stft(
+        x,
+        n_fft=fft_size,
+        hop_length=hop_size,
+        win_length=win_length,
+        window=window.to(x.device),
+        center=True,
+        return_complex=True,
+    )
+    mag = torch.clamp(x_stft.abs(), min=1e-3)
+    return mag.transpose(2, 1)  # (B, frames, freq)
+
+
+class SpectralConvergenceLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x_mag: torch.Tensor, y_mag: torch.Tensor) -> torch.Tensor:
+        return torch.norm(y_mag - x_mag, p="fro") / (torch.norm(y_mag, p="fro") + 1e-9)
+
+
+class LogSTFTMagnitudeLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x_mag: torch.Tensor, y_mag: torch.Tensor) -> torch.Tensor:
+        return F.l1_loss(torch.log(y_mag), torch.log(x_mag))
+
+
+class STFTLoss(nn.Module):
+    """
+    单尺度 STFT Loss：包含谱收敛 + log 幅度两部分。
+    """
+
+    def __init__(self, fft_size=1024, hop_size=256, win_length=1024, window_type: str = "hann_window"):
+        super().__init__()
+        self.fft_size = fft_size
+        self.hop_size = hop_size
+        self.win_length = win_length
+        window = getattr(torch, window_type)(win_length)
+        self.register_buffer("window", window)
+        self.sc_loss = SpectralConvergenceLoss()
+        self.mag_loss = LogSTFTMagnitudeLoss()
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        x, y: (B, L)
+        """
+        x_mag = _stft(x, self.fft_size, self.hop_size, self.win_length, self.window)
+        y_mag = _stft(y, self.fft_size, self.hop_size, self.win_length, self.window)
+        sc = self.sc_loss(x_mag, y_mag)
+        mag = self.mag_loss(x_mag, y_mag)
+        return sc + mag
+
+
+class MultiresolutionSTFTLoss(nn.Module):
+    """
+    多分辨率 STFT Loss，参考 SingingVocoders 的 MultiResolutionSTFTLoss，
+    但这里直接返回各分辨率 loss 的平均值。
+    """
+
+    def __init__(
+        self,
+        fft_sizes=(512, 1024, 2048),
+        hop_sizes=(128, 256, 512),
+        win_lengths=(512, 1024, 2048),
+        window_type: str = "hann_window",
+    ):
+        super().__init__()
+        assert len(fft_sizes) == len(hop_sizes) == len(win_lengths)
+        self.stft_losses = nn.ModuleList(
+            [STFTLoss(fs, ss, wl, window_type) for fs, ss, wl in zip(fft_sizes, hop_sizes, win_lengths)]
+        )
+
+    def forward(self, y: torch.Tensor, y_hat: torch.Tensor, op=None) -> torch.Tensor:
+        """
+        y, y_hat: (B, L)
+        """
+        total = 0.0
+        for f in self.stft_losses:
+            total = total + f(y_hat, y)
+        return total / len(self.stft_losses)
+
+
 class MultiresolutionMelLoss(nn.Module):
     def __init__(self,
                  resolutions=((32, 8, 32, 5),

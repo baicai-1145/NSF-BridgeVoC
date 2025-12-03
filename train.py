@@ -18,6 +18,20 @@ try:
 except ImportError:
 	yaml = None
 
+def _safe_torch_load(path, map_location="cpu"):
+	"""
+	Helper to load checkpoints safely across PyTorch versions.
+	For PyTorch>=2.6, explicitly set weights_only=False for backward compatibility.
+	"""
+	try:
+		return torch.load(path, map_location=map_location, weights_only=False)
+	except TypeError:
+		# Older PyTorch without weights_only argument
+		return torch.load(path, map_location=map_location)
+	except FileNotFoundError as e:
+		print(f"[WARN] pretrained_bridge_ckpt not found: {path}")
+		return None
+
 def _sanitize_logging_name(name: str) -> str:
 	# Replace characters that are problematic on Windows filesystems.
 	# Keep alphanumerics, dot, dash, and underscore; replace others with underscore.
@@ -140,10 +154,12 @@ if __name__ == '__main__':
 			nolog=args.nolog
 		)
 		if temp_args.pretrained_bridge_ckpt is not None:
-			try:
-				model.load_score_model(torch.load(temp_args.pretrained_bridge_ckpt))
-			except:
-				pass
+			ckpt_obj = _safe_torch_load(temp_args.pretrained_bridge_ckpt, map_location="cpu")
+			if ckpt_obj is not None:
+				try:
+					model.load_score_model(ckpt_obj)
+				except Exception as e:
+					print(f"[WARN] Failed to load pretrained_bridge_ckpt: {e}")
 		logging_name = f"mode=bridge-only_sde={sde_class.__name__}_backbone={args.backbone_bridge}"
 		if sde_class.__name__ == "BridgeGAN":
 			bridge_type = vars(arg_groups['SDE'])['bridge_type']
@@ -165,10 +181,12 @@ if __name__ == '__main__':
 			nolog=args.nolog
 		)
 		if temp_args.pretrained_bridge_ckpt is not None:
-			try:
-				model.load_score_model(torch.load(temp_args.pretrained_bridge_ckpt))
-			except:
-				pass
+			ckpt_obj = _safe_torch_load(temp_args.pretrained_bridge_ckpt, map_location="cpu")
+			if ckpt_obj is not None:
+				try:
+					model.load_score_model(ckpt_obj)
+				except Exception as e:
+					print(f"[WARN] Failed to load pretrained_bridge_ckpt: {e}")
 		logging_name = f"mode=sin_sde={sde_class.__name__}_backbone={args.backbone_bridge}"
 		logging_name += "_teacher_N_{}_".format(vars(arg_groups['SinModel'])['teacher_inference_N'])
 		if vars(arg_groups['SinModel'])["use_omni_for_distill"]:

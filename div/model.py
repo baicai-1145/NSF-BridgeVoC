@@ -126,6 +126,8 @@ class ScoreModelGAN(pl.LightningModule):
                 self.loss_dict[cur_loss.lower()] = MelLoss(sampling_rate=self.data_module.sampling_rate)
             elif cur_loss.lower() == "multi-mel":
                 self.loss_dict[cur_loss.lower()] = MultiresolutionMelLoss(sampling_rate=self.data_module.sampling_rate)
+            elif cur_loss.lower() == "multi-stft":
+                self.loss_dict[cur_loss.lower()] = MultiresolutionSTFTLoss()
             elif cur_loss.lower() == "score_mse":
                 self.loss_dict[cur_loss.lower()] = lambda x: self._reduce_op_4(torch.square(torch.abs(x)))
             elif cur_loss.lower() == "score_mae":
@@ -143,7 +145,8 @@ class ScoreModelGAN(pl.LightningModule):
         scheduler = CosineAnnealingLR(optimizer, T_max=self.max_epochs, eta_min=1e-5)
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
-    def lr_scheduler_step(self, scheduler, optimizer_idx, metric):
+    def lr_scheduler_step(self, scheduler, metric=None):
+        # Lightning 2.x 调用签名为 (scheduler, metric=None)
         scheduler.step()
 
     def optimizer_step(self, *args, **kwargs):
@@ -189,6 +192,9 @@ class ScoreModelGAN(pl.LightningModule):
         loss = 0.
         for k in self.loss_dict:
             if k.lower() in ["multi-mel", "mel"]:
+                cur_loss = self.loss_dict[k](x_wav, score_wav, self._reduce_op_3)
+                loss = loss + self.weight_dict[k] * cur_loss
+            elif k.lower() == "multi-stft":
                 cur_loss = self.loss_dict[k](x_wav, score_wav, self._reduce_op_3)
                 loss = loss + self.weight_dict[k] * cur_loss
             elif k.lower() == "score_mse":
@@ -324,7 +330,7 @@ class ScoreModelGAN(pl.LightningModule):
                 L_GAN_G, L_FM = 0., 0.
 
             loss, loss_val_dict = self._loss(err, score_wav=score_wav, x_wav=x_audio)
-            loss1 = loss + 20.0 * (L_GAN_G + L_FM)
+            loss1 = loss + 15.0 * (L_GAN_G + L_FM)
             return loss1, loss_val_dict
 
     def training_step(self, batch, batch_idx, **kwargs):
@@ -438,15 +444,15 @@ class ScoreModelGAN(pl.LightningModule):
 
     def load_score_model(self, checkpoint):
         from collections import OrderedDict
-        import io
+        # checkpoint 可以是已经通过 torch.load 得到的 dict，或者是 ckpt 路径
         if isinstance(checkpoint, dict):
-            buffer = io.BytesIO()
-            torch.save(checkpoint, buffer)
-            buffer.seek(0)
-            state_dict = torch.load(buffer, map_location=self.device)
+            state_dict = checkpoint
         else:
-            state_dict = torch.load(checkpoint, map_location=self.device)
-        
+            try:
+                state_dict = torch.load(checkpoint, map_location=self.device, weights_only=False)
+            except TypeError:
+                state_dict = torch.load(checkpoint, map_location=self.device)
+
         new_state_dict = OrderedDict()
         for k, v in state_dict['state_dict'].items():
             if "discriminators" not in k:
@@ -620,6 +626,8 @@ class SinModel(pl.LightningModule):
                     self.loss_dict[cur_loss.lower()] = MelLoss(sampling_rate=self.data_module.sampling_rate)
                 elif cur_loss.lower() == "multi-mel":
                     self.loss_dict[cur_loss.lower()] = MultiresolutionMelLoss(sampling_rate=self.data_module.sampling_rate)
+                elif cur_loss.lower() == "multi-stft":
+                    self.loss_dict[cur_loss.lower()] = MultiresolutionSTFTLoss()
                 else:
                     raise NotImplementedError
         else:
@@ -640,7 +648,8 @@ class SinModel(pl.LightningModule):
         scheduler = CosineAnnealingLR(optimizer, T_max=self.max_epochs, eta_min=1e-5)
         return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
-    def lr_scheduler_step(self, scheduler, optimizer_idx, metric):
+    def lr_scheduler_step(self, scheduler, metric=None):
+        # Lightning 2.x 调用签名为 (scheduler, metric=None)
         scheduler.step()
         if self.use_gan:
             self.scheduler_d.step()
@@ -713,6 +722,9 @@ class SinModel(pl.LightningModule):
         if self.loss_dict is not None:
             for k in self.loss_dict:
                 if k.lower() in ["mel", "multi-mel"]:
+                    cur_loss = self.loss_dict[k](x_wav, score_wav, self._reduce_op_3)
+                    loss = loss + self.weight_dict[k] * cur_loss
+                elif k.lower() == "multi-stft":
                     cur_loss = self.loss_dict[k](x_wav, score_wav, self._reduce_op_3)
                     loss = loss + self.weight_dict[k] * cur_loss
                 else:

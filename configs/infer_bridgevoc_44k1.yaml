@@ -1,7 +1,7 @@
 raw_wav_path: ./data/train/audio             # 要解码的 wav 根目录
 test_dir: ./data/train/val.txt    # 验证/测试清单或目录
 enhanced_dir: ./test_decode/44k1/bridgevoc   # 输出目录
-ckpt: ./ckpt/Libritts/mode_bridge-only_sde_BridgeGAN_backbone_bcd_sde_type_gmax_c_0.4_k_2.6_beta_max_20.0_s_c_o_r_e___m_s_e___1_._0___m_u_l_t_i_-_m_e_l___0_._1/version_0/checkpoints/epoch=0-periodicity=0.0000-v2.ckpt
+ckpt: ./epoch=1-periodicity=0.0000.ckpt
 
 sde_name: bridgegan
 backbone: bcd

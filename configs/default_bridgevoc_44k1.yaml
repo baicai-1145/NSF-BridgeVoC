@@ -7,7 +7,7 @@ dataset_name: Libritts
 raw_wavfile_path: ./data/train/audio                  # 你的 44.1k wav 根目录
 train_data_dir: ./data/train/train.txt     # 由 make_scp_from_dir.py 生成
 val_data_dir: ./data/train/val.txt         # 由 make_scp_from_dir.py 生成
-ckpt: ckpt/Libritts/mode_bridge-only_sde_BridgeGAN_backbone_bcd_sde_type_gmax_c_0.4_k_2.6_beta_max_20.0_s_c_o_r_e___m_s_e___1_._0___m_u_l_t_i_-_m_e_l___0_._3___m_u_l_t_i_-_s_t_f_t___0_._5/version_5/checkpoints/epoch=0-periodicity=0.0000-v1.ckpt
+ckpt: epoch=4-periodicity=0.0000-v1.ckpt
 max_steps: 1000000
 max_epochs: 3100
 fix_seed: false

@@ -416,6 +416,10 @@ class ScoreModelGAN(pl.LightningModule):
             with torch.no_grad():
                 stft_pred = _stft_log(x_hat.cpu())
                 stft_gt = _stft_log(audio.cpu())
+                # 对齐时间维，避免由于重采样 / ISTFT 边界差异导致的帧数不一致
+                min_t = min(stft_pred.shape[2], stft_gt.shape[2])
+                stft_pred = stft_pred[:, :, :min_t]
+                stft_gt = stft_gt[:, :, :min_t]
                 spec_cat = torch.cat(
                     [(stft_pred - stft_gt).abs(), stft_gt, stft_pred], dim=2
                 )
@@ -1066,6 +1070,9 @@ class SinModel(pl.LightningModule):
             with torch.no_grad():
                 stft_pred = _stft_log(x_hat.cpu())
                 stft_gt = _stft_log(audio.cpu())
+                min_t = min(stft_pred.shape[2], stft_gt.shape[2])
+                stft_pred = stft_pred[:, :, :min_t]
+                stft_gt = stft_gt[:, :, :min_t]
                 spec_cat = torch.cat(
                     [(stft_pred - stft_gt).abs(), stft_gt, stft_pred], dim=2
                 )

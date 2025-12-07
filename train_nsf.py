@@ -52,6 +52,7 @@ def main():
         num_frames=data_cfg["num_frames"],
         batch_size=data_cfg["batch_size"],
         num_workers=data_cfg["num_workers"],
+        use_gpu_fcpe=True,
     )
 
     # 模型
@@ -116,4 +117,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

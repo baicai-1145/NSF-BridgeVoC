@@ -31,6 +31,7 @@ class NsfDataset(Dataset):
         num_mels: int,
         num_frames: int,
         subset: str = "train",
+        use_gpu_fcpe: bool = False,
     ):
         super().__init__()
         self.raw_wav_root = raw_wav_root
@@ -43,7 +44,11 @@ class NsfDataset(Dataset):
         self.num_mels = num_mels
         self.num_frames = num_frames
         self.subset = subset
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # 如果开启 GPU F0，并且当前环境有 CUDA，则使用 GPU；否则退回 CPU
+        if use_gpu_fcpe and torch.cuda.is_available():
+            self.device = "cuda"
+        else:
+            self.device = "cpu"
 
         with open(filelist_path, "r", encoding="utf-8") as f:
             lines = [l.strip() for l in f.readlines() if l.strip()]
@@ -164,6 +169,7 @@ def create_nsf_dataloaders(
     num_frames: int,
     batch_size: int,
     num_workers: int,
+    use_gpu_fcpe: bool = False,
 ):
     train_dataset = NsfDataset(
         train_list,
@@ -177,6 +183,7 @@ def create_nsf_dataloaders(
         num_mels,
         num_frames,
         subset="train",
+        use_gpu_fcpe=use_gpu_fcpe,
     )
     val_dataset = NsfDataset(
         val_list,
@@ -190,13 +197,17 @@ def create_nsf_dataloaders(
         num_mels,
         num_frames,
         subset="val",
+        use_gpu_fcpe=use_gpu_fcpe,
     )
+
+    # 如果在 DataLoader 内使用 GPU 上的 torchfcpe，为避免 fork + CUDA 报错，固定 num_workers=0
+    effective_num_workers = 0 if (use_gpu_fcpe and torch.cuda.is_available()) else num_workers
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
+        num_workers=effective_num_workers,
         pin_memory=True,
         drop_last=True,
     )
@@ -204,7 +215,7 @@ def create_nsf_dataloaders(
         val_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=effective_num_workers,
         pin_memory=True,
         drop_last=False,
     )

@@ -358,99 +358,99 @@ class ScoreModelGAN(pl.LightningModule):
             )
 
         if batch_idx == 0:
-            # 复用当前 batch，生成一对 GT / Pred 频谱图和音频到 TensorBoard
-            x, y, x_audio = batch
-            x_audio = x_audio.squeeze(1)  # (B, L)
-            with torch.no_grad():
-                # 只取第一个样本用于可视化，避免占用过多显存和日志空间
-                audio = x_audio[0:1]
-                # 前向推理一条样本
-                Y = self._forward_transform(audio).unsqueeze(1)
-                if self.data_module.valid_set.phase_init == "random":
-                    phase_ = 2 * torch.pi * torch.rand_like(Y) - torch.pi
-                else:
-                    phase_ = torch.zeros_like(Y)
-                Yc = torch.complex(Y * torch.cos(phase_), Y * torch.sin(phase_))
-                if self.data_module.valid_set.drop_last_freq:
-                    Yc = Yc[:, :, :-1].contiguous()
-                Yc = self.data_module.spec_fwd(Yc)
-                Y_ = torch.cat([Yc.real, Yc.imag], dim=1).to(self.device)
-                cond = Y_
-                if "bridge" in self.sde_name.lower():
-                    sample = self.sde.reverse_diffusion(Y_, cond, self.dnn)
-                    sample = torch.complex(sample[:, 0], sample[:, -1]).unsqueeze(1)
-                else:
-                    sample = Yc
-                if self.data_module.valid_set.drop_last_freq:
-                    sample_last = sample[:, :, -1].unsqueeze(-2).contiguous()
-                    sample = torch.cat([sample, sample_last], dim=-2)
-                x_hat = self.to_audio(sample.squeeze(), audio.shape[-1])
+            # 仅用于可视化的分支，如果出现任何异常，不影响训练流程
+            try:
+                # 复用当前 batch，生成一对 GT / Pred 频谱图和音频到 TensorBoard
+                x, y, x_audio = batch
+                x_audio = x_audio.squeeze(1)  # (B, L)
+                with torch.no_grad():
+                    # 只取第一个样本用于可视化
+                    audio = x_audio[0:1]
+                    Y = self._forward_transform(audio).unsqueeze(1)
+                    if self.data_module.valid_set.phase_init == "random":
+                        phase_ = 2 * torch.pi * torch.rand_like(Y) - torch.pi
+                    else:
+                        phase_ = torch.zeros_like(Y)
+                    Yc = torch.complex(Y * torch.cos(phase_), Y * torch.sin(phase_))
+                    if self.data_module.valid_set.drop_last_freq:
+                        Yc = Yc[:, :, :-1].contiguous()
+                    Yc = self.data_module.spec_fwd(Yc)
+                    Y_ = torch.cat([Yc.real, Yc.imag], dim=1).to(self.device)
+                    cond = Y_
+                    if "bridge" in self.sde_name.lower():
+                        sample = self.sde.reverse_diffusion(Y_, cond, self.dnn)
+                        sample = torch.complex(sample[:, 0], sample[:, -1]).unsqueeze(1)
+                    else:
+                        sample = Yc
+                    if self.data_module.valid_set.drop_last_freq:
+                        sample_last = sample[:, :, -1].unsqueeze(-2).contiguous()
+                        sample = torch.cat([sample, sample_last], dim=-2)
+                    x_hat = self.to_audio(sample.squeeze(), audio.shape[-1])
 
-            # 计算 log-STFT 频谱，用于可视化
-            import torch.nn.functional as F  # 局部导入以避免循环依赖
+                import torch.nn.functional as F
 
-            def _stft_log(spec_audio: torch.Tensor):
-                win_size = self.data_module.win_size
-                n_fft = self.data_module.n_fft
-                hop = self.data_module.hop_size
-                window = torch.hann_window(win_size, device=spec_audio.device)
-                y = F.pad(
-                    spec_audio.unsqueeze(1),
-                    (int((win_size - hop) // 2), int((win_size - hop + 1) // 2)),
-                    mode="reflect",
-                ).squeeze(1)
-                spec = torch.stft(
-                    y,
-                    n_fft,
-                    hop_length=hop,
-                    win_length=win_size,
-                    window=window,
-                    center=False,
-                    normalized=False,
-                    onesided=True,
-                    return_complex=True,
-                ).abs()
-                spec_log = torch.log10(torch.clamp(spec, min=1e-7))
-                return spec_log
+                def _stft_log(spec_audio: torch.Tensor):
+                    win_size = self.data_module.win_size
+                    n_fft = self.data_module.n_fft
+                    hop = self.data_module.hop_size
+                    window = torch.hann_window(win_size, device=spec_audio.device)
+                    y = F.pad(
+                        spec_audio.unsqueeze(1),
+                        (int((win_size - hop) // 2), int((win_size - hop + 1) // 2)),
+                        mode="reflect",
+                    ).squeeze(1)
+                    spec = torch.stft(
+                        y,
+                        n_fft,
+                        hop_length=hop,
+                        win_length=win_size,
+                        window=window,
+                        center=False,
+                        normalized=False,
+                        onesided=True,
+                        return_complex=True,
+                    ).abs()
+                    return torch.log10(torch.clamp(spec, min=1e-7))
 
-            with torch.no_grad():
-                stft_pred = _stft_log(x_hat.cpu())
-                stft_gt = _stft_log(audio.cpu())
-                # 对齐时间维，避免由于重采样 / ISTFT 边界差异导致的帧数不一致
-                min_t = min(stft_pred.shape[2], stft_gt.shape[2])
-                stft_pred = stft_pred[:, :, :min_t]
-                stft_gt = stft_gt[:, :, :min_t]
-                spec_cat = torch.cat(
-                    [(stft_pred - stft_gt).abs(), stft_gt, stft_pred], dim=2
-                )
+                with torch.no_grad():
+                    stft_pred = _stft_log(x_hat.cpu())
+                    stft_gt = _stft_log(audio.cpu())
+                    min_t = min(stft_pred.shape[2], stft_gt.shape[2])
+                    stft_pred = stft_pred[:, :, :min_t]
+                    stft_gt = stft_gt[:, :, :min_t]
+                    spec_cat = torch.cat(
+                        [(stft_pred - stft_gt).abs(), stft_gt, stft_pred], dim=2
+                    )
 
-            if hasattr(self.logger, "experiment"):
-                tb = self.logger.experiment
-                # 频谱图
-                import matplotlib.pyplot as plt
+                if hasattr(self.logger, "experiment"):
+                    tb = self.logger.experiment
+                    import matplotlib.pyplot as plt
 
-                fig, ax = plt.subplots(figsize=(10, 4))
-                ax.pcolor(spec_cat[0].cpu().numpy().T)
-                ax.set_title("GT / Pred STFT (log10) and diff")
-                ax.set_xlabel("Time")
-                ax.set_ylabel("Freq")
-                plt.tight_layout()
-                tb.add_figure("validation/stft_log10", fig, global_step=self.global_step)
-                plt.close(fig)
-                # 音频
-                sr = self.kwargs["sampling_rate"]
-                tb.add_audio(
-                    "validation/pred_audio",
-                    x_hat[0:1],
-                    sample_rate=sr,
-                    global_step=self.global_step,
-                )
-                tb.add_audio(
-                    "validation/gt_audio",
-                    audio[0:1],
-                    sample_rate=sr,
-                    global_step=self.global_step,
-                )
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.pcolor(spec_cat[0].cpu().numpy().T)
+                    ax.set_title("GT / Pred STFT (log10) and diff")
+                    ax.set_xlabel("Time")
+                    ax.set_ylabel("Freq")
+                    plt.tight_layout()
+                    tb.add_figure(
+                        "validation/stft_log10", fig, global_step=self.global_step
+                    )
+                    plt.close(fig)
+                    sr = self.kwargs["sampling_rate"]
+                    tb.add_audio(
+                        "validation/pred_audio",
+                        x_hat[0:1],
+                        sample_rate=sr,
+                        global_step=self.global_step,
+                    )
+                    tb.add_audio(
+                        "validation/gt_audio",
+                        audio[0:1],
+                        sample_rate=sr,
+                        global_step=self.global_step,
+                    )
+            except Exception as e:
+                print(f"[WARN] validation visualization failed: {e}")
 
         if hasattr(self, "scheduler_d"):
             self.scheduler_d.step()
@@ -1019,91 +1019,94 @@ class SinModel(pl.LightningModule):
             )
 
         if batch_idx == 0:
-            x, y, x_audio = batch
-            x_audio = x_audio.squeeze(1)
-            with torch.no_grad():
-                audio = x_audio[0:1]
-                Y = self._forward_transform(audio).unsqueeze(1)
-                if self.data_module.valid_set.phase_init == "random":
-                    phase_ = 2 * torch.pi * torch.rand_like(Y) - torch.pi
-                else:
-                    phase_ = torch.zeros_like(Y)
-                Yc = torch.complex(Y * torch.cos(phase_), Y * torch.sin(phase_))
-                if self.data_module.valid_set.drop_last_freq:
-                    Yc = Yc[:, :, :-1].contiguous()
-                Yc = self.data_module.spec_fwd(Yc)
-                Y_ = torch.cat([Yc.real, Yc.imag], dim=1).to(self.device)
-                cond = Y_
-                t = (torch.ones([Y_.shape[0]]) * (1 - self.sde.offset)).to(Y_.device)
-                sample = self.dnn(inpt=Y_, cond=cond, time_cond=t)
-                sample = torch.complex(sample[:, 0], sample[:, -1]).unsqueeze(1)
-                if self.data_module.valid_set.drop_last_freq:
-                    sample_last = sample[:, :, -1].unsqueeze(-2).contiguous()
-                    sample = torch.cat([sample, sample_last], dim=-2)
-                x_hat = self.to_audio(sample.squeeze(), audio.shape[-1])
+            try:
+                x, y, x_audio = batch
+                x_audio = x_audio.squeeze(1)
+                with torch.no_grad():
+                    audio = x_audio[0:1]
+                    Y = self._forward_transform(audio).unsqueeze(1)
+                    if self.data_module.valid_set.phase_init == "random":
+                        phase_ = 2 * torch.pi * torch.rand_like(Y) - torch.pi
+                    else:
+                        phase_ = torch.zeros_like(Y)
+                    Yc = torch.complex(Y * torch.cos(phase_), Y * torch.sin(phase_))
+                    if self.data_module.valid_set.drop_last_freq:
+                        Yc = Yc[:, :, :-1].contiguous()
+                    Yc = self.data_module.spec_fwd(Yc)
+                    Y_ = torch.cat([Yc.real, Yc.imag], dim=1).to(self.device)
+                    cond = Y_
+                    t = (torch.ones([Y_.shape[0]]) * (1 - self.sde.offset)).to(Y_.device)
+                    sample = self.dnn(inpt=Y_, cond=cond, time_cond=t)
+                    sample = torch.complex(sample[:, 0], sample[:, -1]).unsqueeze(1)
+                    if self.data_module.valid_set.drop_last_freq:
+                        sample_last = sample[:, :, -1].unsqueeze(-2).contiguous()
+                        sample = torch.cat([sample, sample_last], dim=-2)
+                    x_hat = self.to_audio(sample.squeeze(), audio.shape[-1])
 
-            import torch.nn.functional as F
+                import torch.nn.functional as F
 
-            def _stft_log(spec_audio: torch.Tensor):
-                win_size = self.data_module.win_size
-                n_fft = self.data_module.n_fft
-                hop = self.data_module.hop_size
-                window = torch.hann_window(win_size, device=spec_audio.device)
-                y = F.pad(
-                    spec_audio.unsqueeze(1),
-                    (int((win_size - hop) // 2), int((win_size - hop + 1) // 2)),
-                    mode="reflect",
-                ).squeeze(1)
-                spec = torch.stft(
-                    y,
-                    n_fft,
-                    hop_length=hop,
-                    win_length=win_size,
-                    window=window,
-                    center=False,
-                    normalized=False,
-                    onesided=True,
-                    return_complex=True,
-                ).abs()
-                return torch.log10(torch.clamp(spec, min=1e-7))
+                def _stft_log(spec_audio: torch.Tensor):
+                    win_size = self.data_module.win_size
+                    n_fft = self.data_module.n_fft
+                    hop = self.data_module.hop_size
+                    window = torch.hann_window(win_size, device=spec_audio.device)
+                    y = F.pad(
+                        spec_audio.unsqueeze(1),
+                        (int((win_size - hop) // 2), int((win_size - hop + 1) // 2)),
+                        mode="reflect",
+                    ).squeeze(1)
+                    spec = torch.stft(
+                        y,
+                        n_fft,
+                        hop_length=hop,
+                        win_length=win_size,
+                        window=window,
+                        center=False,
+                        normalized=False,
+                        onesided=True,
+                        return_complex=True,
+                    ).abs()
+                    return torch.log10(torch.clamp(spec, min=1e-7))
 
-            with torch.no_grad():
-                stft_pred = _stft_log(x_hat.cpu())
-                stft_gt = _stft_log(audio.cpu())
-                min_t = min(stft_pred.shape[2], stft_gt.shape[2])
-                stft_pred = stft_pred[:, :, :min_t]
-                stft_gt = stft_gt[:, :, :min_t]
-                spec_cat = torch.cat(
-                    [(stft_pred - stft_gt).abs(), stft_gt, stft_pred], dim=2
-                )
+                with torch.no_grad():
+                    stft_pred = _stft_log(x_hat.cpu())
+                    stft_gt = _stft_log(audio.cpu())
+                    min_t = min(stft_pred.shape[2], stft_gt.shape[2])
+                    stft_pred = stft_pred[:, :, :min_t]
+                    stft_gt = stft_gt[:, :, :min_t]
+                    spec_cat = torch.cat(
+                        [(stft_pred - stft_gt).abs(), stft_gt, stft_pred], dim=2
+                    )
 
-            if hasattr(self.logger, "experiment"):
-                tb = self.logger.experiment
-                import matplotlib.pyplot as plt
+                if hasattr(self.logger, "experiment"):
+                    tb = self.logger.experiment
+                    import matplotlib.pyplot as plt
 
-                fig, ax = plt.subplots(figsize=(10, 4))
-                ax.pcolor(spec_cat[0].cpu().numpy().T)
-                ax.set_title("SinModel GT / Pred STFT (log10) and diff")
-                ax.set_xlabel("Time")
-                ax.set_ylabel("Freq")
-                plt.tight_layout()
-                tb.add_figure(
-                    "validation_sin/stft_log10", fig, global_step=self.global_step
-                )
-                plt.close(fig)
-                sr = self.kwargs["sampling_rate"]
-                tb.add_audio(
-                    "validation_sin/pred_audio",
-                    x_hat[0:1],
-                    sample_rate=sr,
-                    global_step=self.global_step,
-                )
-                tb.add_audio(
-                    "validation_sin/gt_audio",
-                    audio[0:1],
-                    sample_rate=sr,
-                    global_step=self.global_step,
-                )
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.pcolor(spec_cat[0].cpu().numpy().T)
+                    ax.set_title("SinModel GT / Pred STFT (log10) and diff")
+                    ax.set_xlabel("Time")
+                    ax.set_ylabel("Freq")
+                    plt.tight_layout()
+                    tb.add_figure(
+                        "validation_sin/stft_log10", fig, global_step=self.global_step
+                    )
+                    plt.close(fig)
+                    sr = self.kwargs["sampling_rate"]
+                    tb.add_audio(
+                        "validation_sin/pred_audio",
+                        x_hat[0:1],
+                        sample_rate=sr,
+                        global_step=self.global_step,
+                    )
+                    tb.add_audio(
+                        "validation_sin/gt_audio",
+                        audio[0:1],
+                        sample_rate=sr,
+                        global_step=self.global_step,
+                    )
+            except Exception as e:
+                print(f"[WARN] validation visualization (sin) failed: {e}")
 
         return loss
     

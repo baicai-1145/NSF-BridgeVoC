@@ -211,16 +211,22 @@ class Specs(Dataset):
         target_len = (self.num_frames - 1) * self.hop_size
         current_len = audio.size(-1)
         pad = max(target_len - current_len, 0)
+        # 记录裁剪/补零信息，便于对 NSF teacher 音频执行相同的对齐操作
+        start = 0
+        pad_left = 0
+        pad_right = 0
         if pad == 0:
             # extract random part of the audio file
             if self.shuffle_spec:
                 start = int(np.random.uniform(0, current_len - target_len))
             else:
-                start = int((current_len-target_len)/2)
+                start = int((current_len - target_len) / 2)
             audio = audio[..., start : start + target_len]
         else:
             # pad audio if the length T is smaller than num_frames
-            audio = F.pad(audio, (pad // 2, pad // 2 + (pad % 2)), mode='constant')
+            pad_left = pad // 2
+            pad_right = pad // 2 + (pad % 2)
+            audio = F.pad(audio, (pad_left, pad_right), mode='constant')
         
         if audio.abs().sum() < 1e-8 :
             print('Skip the previous get_item func.')
@@ -236,43 +242,51 @@ class Specs(Dataset):
 
         audio = audio / normfac
 
-        mel = mel_spectrogram(audio,
-                              n_fft=self.n_fft,
-                              num_mels=self.num_mels,
-                              sampling_rate=self.sampling_rate,
-                              hop_size=self.hop_size,
-                              win_size=self.win_size,
-                              fmin=self.fmin,
-                              fmax=self.fmax,
-                              center=True,
-                              in_dataset=True)
-        # apply inv-mel
-        inv_mel = inverse_mel(mel,
-                              n_fft=self.n_fft,
-                              num_mels=self.num_mels,
-                              sampling_rate=self.sampling_rate,
-                              hop_size=self.hop_size,
-                              win_size=self.win_size,
-                              fmin=self.fmin,
-                              fmax=self.fmax,
-                              in_dataset=True)
+        # 计算 target 频谱 X（始终来自真实音频）
+        X = torch.stft(
+            audio,
+            self.n_fft,
+            hop_length=self.hop_size,
+            win_length=self.win_size,
+            window=torch.hann_window(self.win_size).to(audio.device),
+            center=True,
+            return_complex=True,
+        )
+
+        # 计算输入频谱 Y（bridge-only 路径）：由 mel/inverse-mel + 相位初始化构造输入频谱
+        mel = mel_spectrogram(
+            audio,
+            n_fft=self.n_fft,
+            num_mels=self.num_mels,
+            sampling_rate=self.sampling_rate,
+            hop_size=self.hop_size,
+            win_size=self.win_size,
+            fmin=self.fmin,
+            fmax=self.fmax,
+            center=True,
+            in_dataset=True,
+        )
+        inv_mel = inverse_mel(
+            mel,
+            n_fft=self.n_fft,
+            num_mels=self.num_mels,
+            sampling_rate=self.sampling_rate,
+            hop_size=self.hop_size,
+            win_size=self.win_size,
+            fmin=self.fmin,
+            fmax=self.fmax,
+            in_dataset=True,
+        )
 
         inv_mel = inv_mel.abs().clamp_min_(1e-6)
-        if self.phase_init == 'random':
-            phase_ = 2 * math.pi * torch.rand_like(inv_mel) - math.pi  # [-pi, pi) 
-        elif self.phase_init == 'zero':
+        if self.phase_init == "random":
+            phase_ = 2 * math.pi * torch.rand_like(inv_mel) - math.pi  # [-pi, pi)
+        elif self.phase_init == "zero":
             phase_ = torch.zeros_like(inv_mel)
 
-        Y = torch.complex(inv_mel * torch.cos(phase_), inv_mel * torch.sin(phase_))  # (B, F, T)
-
-        X = torch.stft(audio,
-                       n_fft=self.n_fft,
-                       hop_length=self.hop_size,
-                       win_length=self.win_size,
-                       window=torch.hann_window(self.win_size).to(audio.device),
-                       center=True,
-                       return_complex=True,
-                       )
+        Y = torch.complex(
+            inv_mel * torch.cos(phase_), inv_mel * torch.sin(phase_)
+        )  # (B, F, T)
         X_compress, Y_compress = self.spec_transform(X), self.spec_transform(Y)  # complex-tensor, (B, F, T)
         if self.drop_last_freq:
             X_compress, Y_compress = X_compress[:, :-1].contiguous(), Y_compress[:, :-1].contiguous()  # (B, F-1, T)
@@ -293,7 +307,7 @@ class SpecsDataModule(pl.LightningDataModule):
         parser.add_argument("--train_data_dir", type=str, default="",
                              help="The scp path of the training dataset")
         parser.add_argument("--val_data_dir", type=str, default="", 
-                            help="The scp path of the validation dataset")
+                             help="The scp path of the validation dataset")
         parser.add_argument("--batch_size", type=int, default=16, 
                             help="The batch size. 8 by default.")
         parser.add_argument("--sampling_rate", type=int, default=24000, 

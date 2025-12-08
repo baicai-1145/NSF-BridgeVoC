@@ -22,7 +22,7 @@ ScoreModelGAN:
   ema_decay: 0.999
   t_eps: 0.03
   num_eval_files: 20
-  loss_type_list: "score_mse:1.0,multi-mel:0.4,multi-stft:0.2"
+  loss_type_list: "score_mse:1.0,multi-mel:0.1,multi-stft:0.05"
   use_gan: true
 
 SDE:

@@ -6,7 +6,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from div.nsf_bridge import create_nsf_bridge_dataloaders
-from div.nsf_bridge.module import NsfBridgeVocModel
+from div.nsf_bridge.score_model import NsfBridgeScoreModel
 
 try:
     import yaml
@@ -55,35 +55,60 @@ def main():
         num_workers=data_cfg["num_workers"],
     )
 
-    # 模型骨架：目前复用 NSF-HiFiGAN 结构，后续可以在 NsfBridgeVocModel 内替换为 nsf+BridgeVoC
-    model = NsfBridgeVocModel(
+    # 模型：NSF 源 + BCD 作为 Bridge backbone，使用 Score-based BridgeGAN 训练
+    model = NsfBridgeScoreModel(
+        # 频谱 / 数据参数
         sampling_rate=data_cfg["sampling_rate"],
-        num_mels=data_cfg["num_mels"],
         n_fft=data_cfg["n_fft"],
         hop_size=data_cfg["hop_size"],
         win_size=data_cfg["win_size"],
         fmin=data_cfg["fmin"],
         fmax=data_cfg["fmax"],
-        lr=model_cfg.get("lr", 2e-4),
+        num_mels=data_cfg["num_mels"],
+        drop_last_freq=True,
+        # 优化 / 损失（如果未在 model 段显式指定，则使用合理默认值）
+        opt_type=model_cfg.get("opt_type", "AdamW"),
+        lr=model_cfg.get("lr", 5e-4),
         beta1=model_cfg.get("beta1", 0.8),
         beta2=model_cfg.get("beta2", 0.99),
-        upsample_initial_channel=model_cfg.get("upsample_initial_channel", 512),
-        upsample_rates=model_cfg.get("upsample_rates", [8, 8, 2, 2, 2]),
-        upsample_kernel_sizes=model_cfg.get("upsample_kernel_sizes", [16, 16, 4, 4, 4]),
-        resblock=model_cfg.get("resblock", "1"),
-        resblock_kernel_sizes=model_cfg.get("resblock_kernel_sizes", [3, 7, 11]),
-        resblock_dilation_sizes=model_cfg.get(
-            "resblock_dilation_sizes",
-            [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+        ema_decay=model_cfg.get("ema_decay", 0.999),
+        t_eps=model_cfg.get("t_eps", 0.03),
+        loss_type_list=model_cfg.get(
+            "loss_type_list", "score_mse:1.0,multi-mel:0.4,multi-stft:0.2"
         ),
-        discriminator_periods=model_cfg.get("discriminator_periods", [2, 3, 5, 7, 11]),
-        mini_nsf=model_cfg.get("mini_nsf", False),
-        noise_sigma=model_cfg.get("noise_sigma", 0.0),
-        loss_fft_sizes=tuple(model_cfg.get("loss_fft_sizes", [512, 1024, 2048])),
-        loss_hop_sizes=tuple(model_cfg.get("loss_hop_sizes", [128, 256, 512])),
-        loss_win_lengths=tuple(model_cfg.get("loss_win_lengths", [512, 1024, 2048])),
-        aux_mel_weight=model_cfg.get("aux_mel_weight", 45.0),
-        aux_stft_weight=model_cfg.get("aux_stft_weight", 2.5),
+        use_gan=model_cfg.get("use_gan", True),
+        num_eval_files=model_cfg.get("num_eval_files", 20),
+        max_epochs=trainer_cfg.get("max_epochs", 1000),
+        # SDE / BridgeGAN 参数（如未提供，沿用 default_bridgevoc_44k1.yaml 中设置）
+        beta_min=model_cfg.get("beta_min", 0.01),
+        beta_max=model_cfg.get("beta_max", 20.0),
+        c=model_cfg.get("c", 0.4),
+        k=model_cfg.get("k", 2.6),
+        bridge_type=model_cfg.get("bridge_type", "gmax"),
+        N=model_cfg.get("N", 4),
+        offset=model_cfg.get("offset", 1e-5),
+        predictor=model_cfg.get("predictor", "x0"),
+        sampling_type=model_cfg.get("sampling_type", "sde_first_order"),
+        # BCD 结构参数（与 default_bridgevoc_44k1.yaml 中 BackboneScore 保持一致）
+        nblocks=model_cfg.get("nblocks", 8),
+        hidden_channel=model_cfg.get("hidden_channel", 256),
+        f_kernel_size=model_cfg.get("f_kernel_size", 9),
+        t_kernel_size=model_cfg.get("t_kernel_size", 11),
+        mlp_ratio=model_cfg.get("mlp_ratio", 1),
+        ada_rank=model_cfg.get("ada_rank", 32),
+        ada_alpha=model_cfg.get("ada_alpha", 32),
+        ada_mode=model_cfg.get("ada_mode", "sola"),
+        act_type=model_cfg.get("act_type", "gelu"),
+        pe_type=model_cfg.get("pe_type", "positional"),
+        scale=model_cfg.get("scale", 1000),
+        decode_type=model_cfg.get("decode_type", "ri"),
+        use_adanorm=model_cfg.get("use_adanorm", True),
+        causal=model_cfg.get("causal", False),
+        # NSF 源参数：如未显式给出，则使用 SourceModuleHnNSF 默认值
+        harmonic_num=model_cfg.get("harmonic_num", 8),
+        sine_amp=model_cfg.get("sine_amp", 0.1),
+        add_noise_std=model_cfg.get("add_noise_std", 0.003),
+        voiced_threshold=model_cfg.get("voiced_threshold", 0.0),
     )
 
     # 日志与检查点
@@ -119,4 +144,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -20,7 +20,7 @@ def _parse_args():
         "--config",
         type=str,
         required=True,
-        help="YAML 配置路径，例如 configs/nsf_hifigan_44k1.yaml 或未来的 nsf-bridge 配置",
+        help="YAML 配置路径，例如 configs/default_bridgevoc_44k1.yaml 或未来的 nsf-bridge 配置",
     )
     parser.add_argument(
         "--out_root",

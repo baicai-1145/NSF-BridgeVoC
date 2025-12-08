@@ -3,12 +3,16 @@ trainer:
   accelerator: gpu
   devices: 1
   accumulate_grad_batches: 1
+  # 权重保存步数
   ckpt_every_n_steps: 10000
+  # 验证间隔步数（与保存步数解耦）
+  val_check_interval: 20000
 
 data:
   raw_wavfile_path: ./data/train/audio
   train_data_dir: ./data/train/train.txt
   val_data_dir: ./data/train/val.txt
+  f0_root: ./data/f0
   batch_size: 2
   num_workers: 4
   sampling_rate: 44100
@@ -43,3 +47,4 @@ model:
   loss_win_lengths: [512, 1024, 2048]
   aux_mel_weight: 45.0
   aux_stft_weight: 2.5
+

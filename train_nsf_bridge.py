@@ -1,9 +1,16 @@
 import argparse
 import os
+import sys
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
+
+# 确保无论从哪个工作目录运行，本工程根目录都在 sys.path 中，
+# 这样就不需要每次手动设置 PYTHONPATH=.
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from div.nsf_bridge import create_nsf_bridge_dataloaders
 from div.nsf_bridge.score_model import NsfBridgeScoreModel

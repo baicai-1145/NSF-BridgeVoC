@@ -103,8 +103,10 @@ def _process_one_file(
     # 略保守的幅度范围，减少 torchfcpe 内部对超界值的告警
     audio = np.clip(audio, -0.95, 0.95)
 
-    # 为了使 F0 与训练/推理时使用的 mel 对齐，这里复用同样的 mel_spectrogram
-    audio_t = torch.from_numpy(audio).unsqueeze(0)
+    # 为了使 F0 与训练/推理时使用的 mel 对齐，这里复用同样的 mel_spectrogram。
+    # 若 device 为 cuda，则在 GPU 上完成 STFT+mel；否则退回 CPU。
+    torch_device = torch.device(device)
+    audio_t = torch.from_numpy(audio).unsqueeze(0).to(torch_device)
     with torch.no_grad():
         mel = mel_spectrogram(
             audio_t,
@@ -116,8 +118,8 @@ def _process_one_file(
             fmin=fmin,
             fmax=fmax,
             center=True,
-            in_dataset=True,
-        )[0]
+            in_dataset=False,
+        )[0].cpu()
 
     frames = mel.shape[1]
     if frames <= 0:

@@ -4,10 +4,9 @@ import os
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
-import torch
 
-from div.nsf.data import create_nsf_dataloaders
-from div.nsf.module import NsfHifiGanModel
+from div.nsf_bridge import create_nsf_bridge_dataloaders
+from div.nsf_bridge.module import NsfBridgeVocModel
 
 try:
     import yaml
@@ -15,21 +14,22 @@ except ImportError:
     yaml = None
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="NSF-HiFiGAN training entry for NSF-BridgeVoC")
+def _parse_args():
+    parser = argparse.ArgumentParser(description="NSF-BridgeVoc 训练入口（使用离线 F0）")
     parser.add_argument(
         "--config",
         type=str,
         required=True,
-        help="YAML 配置文件路径，例如 configs/nsf_hifigan_44k1.yaml",
+        help="YAML 配置文件路径，例如 configs/nsf_bridgevoc_44k1.yaml",
     )
     return parser.parse_args()
 
 
 def main():
-    args = parse_args()
+    args = _parse_args()
     if yaml is None:
-        raise ImportError("PyYAML is required when using --config. Please install it via `pip install pyyaml`.")
+        raise ImportError("需要 PyYAML 才能解析配置文件，请先安装：pip install pyyaml")
+
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
@@ -37,11 +37,12 @@ def main():
     data_cfg = cfg.get("data", {})
     model_cfg = cfg.get("model", {})
 
-    # 数据加载器
-    train_loader, val_loader = create_nsf_dataloaders(
+    # 数据加载器（使用离线 F0）
+    train_loader, val_loader = create_nsf_bridge_dataloaders(
         train_list=data_cfg["train_data_dir"],
         val_list=data_cfg["val_data_dir"],
         raw_wav_root=data_cfg["raw_wavfile_path"],
+        f0_root=data_cfg.get("f0_root", "./data/f0"),
         sampling_rate=data_cfg["sampling_rate"],
         n_fft=data_cfg["n_fft"],
         hop_size=data_cfg["hop_size"],
@@ -52,11 +53,10 @@ def main():
         num_frames=data_cfg["num_frames"],
         batch_size=data_cfg["batch_size"],
         num_workers=data_cfg["num_workers"],
-        use_gpu_fcpe=True,
     )
 
-    # 模型
-    model = NsfHifiGanModel(
+    # 模型骨架：目前复用 NSF-HiFiGAN 结构，后续可以在 NsfBridgeVocModel 内替换为 nsf+BridgeVoC
+    model = NsfBridgeVocModel(
         sampling_rate=data_cfg["sampling_rate"],
         num_mels=data_cfg["num_mels"],
         n_fft=data_cfg["n_fft"],
@@ -68,17 +68,15 @@ def main():
         beta1=model_cfg.get("beta1", 0.8),
         beta2=model_cfg.get("beta2", 0.99),
         upsample_initial_channel=model_cfg.get("upsample_initial_channel", 512),
-        upsample_rates=model_cfg.get("upsample_rates", [8, 8, 2, 2]),
-        upsample_kernel_sizes=model_cfg.get("upsample_kernel_sizes", [16, 16, 4, 4]),
+        upsample_rates=model_cfg.get("upsample_rates", [8, 8, 2, 2, 2]),
+        upsample_kernel_sizes=model_cfg.get("upsample_kernel_sizes", [16, 16, 4, 4, 4]),
         resblock=model_cfg.get("resblock", "1"),
         resblock_kernel_sizes=model_cfg.get("resblock_kernel_sizes", [3, 7, 11]),
         resblock_dilation_sizes=model_cfg.get(
             "resblock_dilation_sizes",
             [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
         ),
-        discriminator_periods=model_cfg.get(
-            "discriminator_periods", [2, 3, 5, 7, 11]
-        ),
+        discriminator_periods=model_cfg.get("discriminator_periods", [2, 3, 5, 7, 11]),
         mini_nsf=model_cfg.get("mini_nsf", False),
         noise_sigma=model_cfg.get("noise_sigma", 0.0),
         loss_fft_sizes=tuple(model_cfg.get("loss_fft_sizes", [512, 1024, 2048])),
@@ -89,17 +87,19 @@ def main():
     )
 
     # 日志与检查点
-    log_dir = os.path.join("ckpt", "nsf_hifigan_44k1")
+    log_dir = os.path.join("ckpt", "nsf_bridgevoc_44k1")
     logger = TensorBoardLogger(
         save_dir=log_dir,
-        name="nsf_hifigan",
+        name="nsf_bridgevoc",
     )
-    # 固定训练步数保存权重（不再按验证指标筛选）
+
     ckpt_every_n_steps = trainer_cfg.get("ckpt_every_n_steps", 10000)
+    val_check_interval = trainer_cfg.get("val_check_interval", 20000)
+
     checkpoint_cb = ModelCheckpoint(
         dirpath=os.path.join(log_dir, "checkpoints"),
         filename="step={step}",
-        save_top_k=-1,  # 保留所有按步数保存的权重，按需自行清理
+        save_top_k=-1,
         every_n_train_steps=ckpt_every_n_steps,
         save_on_train_epoch_end=False,
     )
@@ -111,6 +111,7 @@ def main():
         accumulate_grad_batches=trainer_cfg.get("accumulate_grad_batches", 1),
         logger=logger,
         callbacks=[checkpoint_cb, TQDMProgressBar(refresh_rate=100)],
+        val_check_interval=val_check_interval,
     )
 
     trainer.fit(model, train_loader, val_loader)
@@ -118,3 +119,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

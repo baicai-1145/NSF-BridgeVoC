@@ -4,6 +4,7 @@ import pytorch_lightning as pl
 import torch
 from torch import nn
 
+from div.data_module import mel_spectrogram
 from div.nsf import (
     AttrDict,
     NsfHifiGenerator,
@@ -52,9 +53,10 @@ class NsfHifiGanModel(pl.LightningModule):
     ):
         super().__init__()
         if upsample_rates is None:
-            upsample_rates = [8, 8, 2, 2]
+            # 与 SingingVocoders nsf_hifigan 配置保持一致，乘积=hop_size=512
+            upsample_rates = [8, 8, 2, 2, 2]
         if upsample_kernel_sizes is None:
-            upsample_kernel_sizes = [16, 16, 4, 4]
+            upsample_kernel_sizes = [16, 16, 4, 4, 4]
         if resblock_kernel_sizes is None:
             resblock_kernel_sizes = [3, 7, 11]
         if resblock_dilation_sizes is None:
@@ -192,5 +194,71 @@ class NsfHifiGanModel(pl.LightningModule):
             wav_fake = self.generator(mel, f0)
             aux_loss, _ = self.aux_loss(wav_fake, audio)
         self.log("val_aux_loss", aux_loss, on_step=False, on_epoch=True, prog_bar=True)
-        return {"val_aux_loss": aux_loss}
 
+        # 首个 batch 额外在 TensorBoard 中记录 mel 频谱与 F0，方便检查 F0 管线与重建质量
+        if batch_idx == 0 and hasattr(self.logger, "experiment"):
+            try:
+                tb = self.logger.experiment
+                import matplotlib.pyplot as plt
+
+                sr = self.hparams.sampling_rate
+                n_fft = self.hparams.n_fft
+                hop_size = self.hparams.hop_size
+                win_size = self.hparams.win_size
+                fmin = self.hparams.fmin
+                fmax = self.hparams.fmax
+                num_mels = self.hparams.num_mels
+
+                # 由波形重新计算 mel，和数据集提供的 mel 对比
+                mel_pred = mel_spectrogram(
+                    wav_fake[:, 0],  # (B, T)
+                    n_fft=n_fft,
+                    num_mels=num_mels,
+                    sampling_rate=sr,
+                    hop_size=hop_size,
+                    win_size=win_size,
+                    fmin=fmin,
+                    fmax=fmax,
+                    center=True,
+                    in_dataset=False,
+                )
+                mel_gt = mel
+                # [diff | gt | pred]
+                spec_cat = torch.cat([(mel_pred - mel_gt).abs(), mel_gt, mel_pred], dim=2)
+
+                fig, ax = plt.subplots(figsize=(10, 4))
+                ax.pcolor(spec_cat[0].cpu().numpy())
+                ax.set_title("NSF mel diff | GT | Pred")
+                ax.set_xlabel("Frames")
+                ax.set_ylabel("Mel bins")
+                plt.tight_layout()
+                tb.add_figure("validation/nsf_mel", fig, global_step=self.global_step)
+                plt.close(fig)
+
+                # F0 曲线可视化，检查是否存在明显错误（全 0、跳变等）
+                fig2, ax2 = plt.subplots(figsize=(8, 3))
+                ax2.plot(f0[0].detach().cpu().numpy())
+                ax2.set_title("NSF F0 (Hz)")
+                ax2.set_xlabel("Frames")
+                ax2.set_ylabel("F0")
+                plt.tight_layout()
+                tb.add_figure("validation/nsf_f0", fig2, global_step=self.global_step)
+                plt.close(fig2)
+
+                # 同时记录一对音频
+                tb.add_audio(
+                    "validation/nsf_audio_pred",
+                    wav_fake[0],
+                    sample_rate=sr,
+                    global_step=self.global_step,
+                )
+                tb.add_audio(
+                    "validation/nsf_audio_gt",
+                    audio[0],
+                    sample_rate=sr,
+                    global_step=self.global_step,
+                )
+            except Exception as e:
+                print(f"[WARN] NSF validation visualization failed: {e}")
+
+        return {"val_aux_loss": aux_loss}

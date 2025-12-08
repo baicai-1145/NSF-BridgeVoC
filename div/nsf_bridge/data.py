@@ -1,27 +1,29 @@
 import os
 import random
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 from div.data_module import load_wav, mel_spectrogram
-from div.nsf.f0_utils import extract_f0_fcpe
 
 
-class NsfDataset(Dataset):
+class NsfBridgeDataset(Dataset):
     """
-    基于 wav 列表按需提取 mel 与 f0 的简单数据集。
+    NSF-BridgeVoc 专用数据集：
 
-    - 文件列表格式复用 BridgeVoC 当前的 LibriTTS 风格：每行 \"rel/path|dummy\"。
-    - f0 使用 torchfcpe 在线提取，高质量且速度较快。
+    - 从 wav 清单中读取音频；
+    - 使用离线预计算好的 F0（precompute_f0.py 生成的 .f0.npy）；
+    - 在线计算 mel，使 mel / F0 / waveform 在帧级严格对齐；
+    - 裁剪固定帧数的片段供模型训练。
     """
 
     def __init__(
         self,
         filelist_path: str,
         raw_wav_root: str,
+        f0_root: str,
         sampling_rate: int,
         n_fft: int,
         hop_size: int,
@@ -31,10 +33,10 @@ class NsfDataset(Dataset):
         num_mels: int,
         num_frames: int,
         subset: str = "train",
-        use_gpu_fcpe: bool = False,
     ):
         super().__init__()
         self.raw_wav_root = raw_wav_root
+        self.f0_root = f0_root
         self.sampling_rate = sampling_rate
         self.n_fft = n_fft
         self.hop_size = hop_size
@@ -44,59 +46,54 @@ class NsfDataset(Dataset):
         self.num_mels = num_mels
         self.num_frames = num_frames
         self.subset = subset
-        # 如果开启 GPU F0，并且当前环境有 CUDA，则使用 GPU；否则退回 CPU
-        if use_gpu_fcpe and torch.cuda.is_available():
-            self.device = "cuda"
-        else:
-            self.device = "cpu"
 
         with open(filelist_path, "r", encoding="utf-8") as f:
             lines = [l.strip() for l in f.readlines() if l.strip()]
+
+        self.rel_paths: List[str] = []
         self.wav_files: List[str] = []
         for l in lines:
-            rel = l.split("|")[0]
+            rel = l.split("|")[0].replace("\\", "/")
             if not rel.endswith(".wav"):
                 rel = f"{rel}.wav"
+            self.rel_paths.append(rel)
             self.wav_files.append(os.path.join(raw_wav_root, rel))
 
         if subset == "train":
             random.seed(3407)
-            random.shuffle(self.wav_files)
+            paired = list(zip(self.rel_paths, self.wav_files))
+            random.shuffle(paired)
+            self.rel_paths, self.wav_files = zip(*paired)
+            self.rel_paths = list(self.rel_paths)
+            self.wav_files = list(self.wav_files)
 
     def __len__(self) -> int:
         return len(self.wav_files)
 
-    def _compute_f0(self, audio: np.ndarray, n_frames: int) -> np.ndarray:
+    def _load_f0_full(self, rel_path: str) -> np.ndarray:
         """
-        使用 torchfcpe 进行 F0 提取，并对长度进行裁剪/补齐到 n_frames。
+        从离线 F0 目录中读取完整序列。
         """
-        return extract_f0_fcpe(
-            audio,
-            sr=self.sampling_rate,
-            n_frames=n_frames,
-            device=self.device,
-            f0_min=80.0,
-            f0_max=880.0,
-            threshold=0.006,
-            interp_uv=False,
-        )
+        f0_path = os.path.join(self.f0_root, self.subset, rel_path)
+        f0_path = f0_path.replace(".wav", ".f0.npy")
+        if not os.path.exists(f0_path):
+            raise FileNotFoundError(f"F0 file not found for {rel_path}: {f0_path}")
+        f0 = np.load(f0_path).astype(np.float32)
+        return f0
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         filename = self.wav_files[idx]
-        # 某些文件可能是非标准 WAV 格式，librosa/soundfile 无法解码。
-        # 为了训练稳定，这里捕获异常并换一条样本，而不是直接中断训练。
+        rel = self.rel_paths[idx]
+
         try:
             audio = load_wav(filename, self.sampling_rate)  # (T,)
         except Exception:
-            # 简单换到下一条样本；如坏文件较多可以根据需要清理数据集
             new_idx = (idx + 1) % len(self.wav_files)
             return self.__getitem__(new_idx)
 
         audio = np.asarray(audio, dtype=np.float32)
-        # 略微收紧到 [-0.95, 0.95]，减少 torchfcpe 对超界值的告警
-        audio = np.clip(audio, -0.95, 0.95)
+        audio = np.clip(audio, -1.0, 1.0)
 
-        # 计算 mel：返回 (n_mels, frames)
         audio_t = torch.from_numpy(audio).unsqueeze(0)
         mel = mel_spectrogram(
             audio_t,
@@ -112,7 +109,6 @@ class NsfDataset(Dataset):
         )[0]
 
         total_frames = mel.shape[1]
-        # 训练时如果样本太短（帧数不足 num_frames），直接换一条样本，避免 batch 内长度不一致
         if self.subset == "train" and self.num_frames > 0 and total_frames < self.num_frames:
             new_idx = (idx + 1) % len(self.wav_files)
             return self.__getitem__(new_idx)
@@ -126,6 +122,7 @@ class NsfDataset(Dataset):
         else:
             start = 0
             end = total_frames
+
         mel = mel[:, start:end]
         frames = mel.shape[1]
 
@@ -137,20 +134,25 @@ class NsfDataset(Dataset):
         if len(audio_seg) < target_len:
             audio_seg = np.pad(audio_seg, (0, target_len - len(audio_seg)), mode="constant")
 
-        # 提取 f0
-        f0 = self._compute_f0(audio_seg, frames)
+        # 裁剪 F0
+        f0_full = self._load_f0_full(rel)
+        if f0_full.shape[0] < end:
+            pad = end - f0_full.shape[0]
+            f0_full = np.pad(f0_full, (0, pad), mode="edge")
+        f0_seg = f0_full[start:end]
 
         return {
             "audio": torch.from_numpy(audio_seg).unsqueeze(0),
-            "mel": mel,  # (n_mels, frames)
-            "f0": torch.from_numpy(f0),
+            "mel": mel,
+            "f0": torch.from_numpy(f0_seg.astype(np.float32)),
         }
 
 
-def create_nsf_dataloaders(
+def create_nsf_bridge_dataloaders(
     train_list: str,
     val_list: str,
     raw_wav_root: str,
+    f0_root: str,
     sampling_rate: int,
     n_fft: int,
     hop_size: int,
@@ -161,11 +163,11 @@ def create_nsf_dataloaders(
     num_frames: int,
     batch_size: int,
     num_workers: int,
-    use_gpu_fcpe: bool = False,
 ):
-    train_dataset = NsfDataset(
+    train_dataset = NsfBridgeDataset(
         train_list,
         raw_wav_root,
+        f0_root,
         sampling_rate,
         n_fft,
         hop_size,
@@ -175,11 +177,11 @@ def create_nsf_dataloaders(
         num_mels,
         num_frames,
         subset="train",
-        use_gpu_fcpe=use_gpu_fcpe,
     )
-    val_dataset = NsfDataset(
+    val_dataset = NsfBridgeDataset(
         val_list,
         raw_wav_root,
+        f0_root,
         sampling_rate,
         n_fft,
         hop_size,
@@ -189,17 +191,13 @@ def create_nsf_dataloaders(
         num_mels,
         num_frames,
         subset="val",
-        use_gpu_fcpe=use_gpu_fcpe,
     )
-
-    # 如果在 DataLoader 内使用 GPU 上的 torchfcpe，为避免 fork + CUDA 报错，固定 num_workers=0
-    effective_num_workers = 0 if (use_gpu_fcpe and torch.cuda.is_available()) else num_workers
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=effective_num_workers,
+        num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
     )
@@ -207,8 +205,9 @@ def create_nsf_dataloaders(
         val_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=effective_num_workers,
+        num_workers=num_workers,
         pin_memory=True,
         drop_last=False,
     )
     return train_loader, val_loader
+

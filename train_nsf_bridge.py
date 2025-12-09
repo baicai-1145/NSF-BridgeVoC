@@ -29,6 +29,12 @@ def _parse_args():
         required=True,
         help="YAML 配置文件路径，例如 configs/nsf_bridgevoc_44k1.yaml",
     )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        default=None,
+        help="可选：从已有 checkpoint 恢复/微调的路径，例如 ckpt/nsf_bridgevoc_44k1/checkpoints/step=step=230000.ckpt",
+    )
     return parser.parse_args()
 
 
@@ -72,7 +78,10 @@ def main():
         fmin=data_cfg["fmin"],
         fmax=data_cfg["fmax"],
         num_mels=data_cfg["num_mels"],
-        drop_last_freq=True,
+        spec_factor=model_cfg.get("spec_factor", 0.33),
+        spec_abs_exponent=model_cfg.get("spec_abs_exponent", 0.5),
+        transform_type=model_cfg.get("transform_type", "exponent"),
+        drop_last_freq=model_cfg.get("drop_last_freq", True),
         # 优化 / 损失（如果未在 model 段显式指定，则使用合理默认值）
         opt_type=model_cfg.get("opt_type", "AdamW"),
         lr=model_cfg.get("lr", 5e-4),
@@ -146,7 +155,7 @@ def main():
         val_check_interval=val_check_interval,
     )
 
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, train_loader, val_loader, ckpt_path=args.ckpt_path)
 
 
 if __name__ == "__main__":

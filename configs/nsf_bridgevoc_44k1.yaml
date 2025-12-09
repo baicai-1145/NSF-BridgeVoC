@@ -36,6 +36,12 @@ model:
   use_gan: true
   loss_type_list: "score_mse:1.0,multi-mel:0.1,multi-stft:0.05"
 
+  # 频谱压缩参数（与 default_bridgevoc_44k1.yaml 中 DataModule 段保持一致）
+  spec_factor: 0.33
+  spec_abs_exponent: 0.5
+  transform_type: exponent
+  drop_last_freq: true
+
   # BridgeGAN SDE 参数（与 default_bridgevoc_44k1.yaml 中 SDE 段保持一致）
   beta_min: 0.01
   beta_max: 20.0

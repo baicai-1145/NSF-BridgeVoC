@@ -4,6 +4,7 @@ import pytorch_lightning as pl
 import torch
 from torch import nn
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import warnings
 
 from div.backbones.bcd_nsf_bridge import NsfBcdBridge
 from div.backbones.discriminators import (
@@ -47,6 +48,10 @@ class NsfBridgeScoreModel(pl.LightningModule):
         fmin: float = 0.0,
         fmax: float = 22050.0,
         num_mels: int = 128,
+        # 频谱压缩参数（与 bridge-only DataModule 对齐）
+        spec_factor: float = 0.33,
+        spec_abs_exponent: float = 0.5,
+        transform_type: str = "exponent",
         drop_last_freq: bool = True,
         # ScoreModel & 优化参数（与 ScoreModelGAN 对齐）
         opt_type: str = "AdamW",
@@ -100,6 +105,9 @@ class NsfBridgeScoreModel(pl.LightningModule):
         self.fmax = fmax
         self.num_mels = num_mels
         self.drop_last_freq = drop_last_freq
+        self.spec_factor = spec_factor
+        self.spec_abs_exponent = spec_abs_exponent
+        self.transform_type = transform_type
 
         # SDE：BridgeGAN
         self.sde = BridgeGAN(
@@ -230,6 +238,32 @@ class NsfBridgeScoreModel(pl.LightningModule):
         super().optimizer_step(*args, **kwargs)
         self.ema.update(self.dnn.parameters())
 
+    # ----------------- EMA checkpoint hooks -----------------
+    def on_load_checkpoint(self, checkpoint) -> None:
+        """
+        使 EMA 在恢复 / 推理由 checkpoint 加载时行为与 ScoreModelGAN 一致：
+
+        - 如果 checkpoint 中包含 'ema' 状态，则正常恢复；
+        - 否则置 _error_loading_ema=True，后续 eval()/train() 均不会再尝试覆盖 dnn 参数，
+          避免在推理时被未训练的 shadow_params 覆盖成随机权重，导致听起来像白噪音。
+        """
+        ema_state = checkpoint.get("ema", None)
+        if ema_state is not None:
+            try:
+                self.ema.load_state_dict(ema_state)
+            except Exception as e:
+                self._error_loading_ema = True
+                warnings.warn(f"Failed to load EMA state from checkpoint, disable EMA. Error: {e}")
+        else:
+            self._error_loading_ema = True
+            warnings.warn("EMA state_dict not found in checkpoint! Disable EMA for this run.")
+
+    def on_save_checkpoint(self, checkpoint) -> None:
+        """
+        将 EMA 状态一并写入 checkpoint，方便后续恢复 / 推理时使用。
+        """
+        checkpoint["ema"] = self.ema.state_dict()
+
     def train(self, mode: bool = True, no_ema: bool = False):
         res = super().train(mode)
         if not self._error_loading_ema:
@@ -302,6 +336,60 @@ class NsfBridgeScoreModel(pl.LightningModule):
         )
         return spec
 
+    def _spec_fwd(self, spec: torch.Tensor) -> torch.Tensor:
+        """
+        复数谱前向变换：在复杂谱域做幅度压缩，与 SpecsDataModule.spec_fwd / enhancement.py 保持一致。
+        """
+        if self.transform_type == "exponent":
+            if self.spec_abs_exponent != 1.0:
+                e = self.spec_abs_exponent
+                spec = spec.abs() ** e * torch.exp(1j * spec.angle())
+            spec = spec * self.spec_factor
+        elif self.transform_type == "log":
+            spec = torch.log(1 + spec.abs()) * torch.exp(1j * spec.angle())
+            spec = spec * self.spec_factor
+        elif self.transform_type == "none":
+            pass
+        return spec
+
+    def _spec_back(self, spec: torch.Tensor) -> torch.Tensor:
+        """
+        复数谱反变换：与 _spec_fwd 精确互逆。
+        """
+        if self.transform_type == "exponent":
+            spec = spec / self.spec_factor
+            if self.spec_abs_exponent != 1.0:
+                e = self.spec_abs_exponent
+                spec = spec.abs() ** (1.0 / e) * torch.exp(1j * spec.angle())
+        elif self.transform_type == "log":
+            spec = spec / self.spec_factor
+            spec = (torch.exp(spec.abs()) - 1.0) * torch.exp(1j * spec.angle())
+        elif self.transform_type == "none":
+            pass
+        return spec
+
+    def _ri_score_to_wav(self, score: torch.Tensor, real_len: int) -> torch.Tensor:
+        """
+        将压缩谱域中的 score (B,2,F,T) 映射回波形：
+        - 先还原为复数压缩谱；
+        - 若 drop_last_freq，则补回最后一个频带；
+        - 再通过 _spec_back 恢复到原始 STFT，再 iSTFT 得到波形。
+        """
+        score_complex = torch.complex(score[:, 0], score[:, 1])  # (B, F, T) 或 (B, F-1, T)
+        if self.drop_last_freq:
+            last_band = score_complex[:, -1:, :].contiguous()
+            score_complex = torch.cat([score_complex, last_band], dim=1)  # (B, F, T)
+        score_complex = self._spec_back(score_complex)
+        score_wav = torch.istft(
+            score_complex,
+            n_fft=self.n_fft,
+            hop_length=self.hop_size,
+            win_length=self.win_size,
+            center=True,
+            length=real_len,
+        )
+        return score_wav
+
     def _step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         """
         batch: dict(audio=(B,1,L), mel=(B,num_mels,frames), f0=(B,frames))
@@ -317,12 +405,17 @@ class NsfBridgeScoreModel(pl.LightningModule):
         x_spec = self._stft_audio(x_audio)  # (B, F, T)
         if self.drop_last_freq:
             x_spec = x_spec[:, :-1].contiguous()
+        x_spec = self._spec_fwd(x_spec)
         x_ri = torch.stack([x_spec.real, x_spec.imag], dim=1)  # (B, 2, F, T)
 
         # 2) 条件谱 Y：由 mel + F0 通过 NSF 源 + BCD 前端构造
-        cond_full = self.dnn.build_cond(mel, f0)  # (B, 2, F_full, T)
+        cond_full_ri = self.dnn.build_cond(mel, f0)  # (B, 2, F_full, T)
         if self.drop_last_freq:
-            cond_full = cond_full[:, :, :-1].contiguous()
+            cond_full_ri = cond_full_ri[:, :, :-1].contiguous()
+
+        cond_spec = torch.complex(cond_full_ri[:, 0], cond_full_ri[:, 1])  # (B, F, T) or (B, F-1, T)
+        cond_spec = self._spec_fwd(cond_spec)
+        cond_full = torch.stack([cond_spec.real, cond_spec.imag], dim=1)  # (B, 2, F, T)
 
         # 确保时间维对齐
         T_common = min(x_ri.shape[-1], cond_full.shape[-1])
@@ -340,32 +433,8 @@ class NsfBridgeScoreModel(pl.LightningModule):
                 t = torch.clamp(t, self.sde.offset, 1.0 - self.sde.offset)
                 xt, target = self.sde.forward_diffusion(x0=x, x1=y, t=t)
                 score = self(xt, t, y)  # generator 输出
-
-                # 将 score 还原为波形，用于判别器
-                score_mag = torch.norm(score, dim=1)  # (B, F, T)
-                if self.drop_last_freq:
-                    last_mag = score_mag[:, -1, None]
-                    score_mag_ = torch.cat([score_mag, last_mag], dim=1)
-                else:
-                    score_mag_ = score_mag
-                score_pha = torch.atan2(score[:, -1], score[:, 0])
-                if self.drop_last_freq:
-                    last_pha = score_pha[:, -1, None]
-                    score_pha_ = torch.cat([score_pha, last_pha], dim=1)
-                else:
-                    score_pha_ = score_pha
-
-                score_decom = torch.complex(
-                    score_mag_ * torch.cos(score_pha_), score_mag_ * torch.sin(score_pha_)
-                )
-                score_wav = torch.istft(
-                    score_decom,
-                    n_fft=self.n_fft,
-                    hop_length=self.hop_size,
-                    win_length=self.win_size,
-                    center=True,
-                    length=real_len,
-                )
+                # 将 score 还原为波形，用于判别器（与 bridge-only 相同的谱压缩/反变换流程）
+                score_wav = self._ri_score_to_wav(score, real_len)
 
                 self.optim_d.zero_grad()
                 y_df_hat_r, y_df_hat_g, _, _ = self.mpd(x_audio, score_wav.detach())
@@ -385,30 +454,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
             err = score - target
 
             if len(self.loss_dict) > 0:
-                score_mag = torch.norm(score, dim=1)  # (B, F, T)
-                if self.drop_last_freq:
-                    last_mag = score_mag[:, -1, None]
-                    score_mag_ = torch.cat([score_mag, last_mag], dim=1)
-                else:
-                    score_mag_ = score_mag
-                score_pha = torch.atan2(score[:, -1], score[:, 0])
-                if self.drop_last_freq:
-                    last_pha = score_pha[:, -1, None]
-                    score_pha_ = torch.cat([score_pha, last_pha], dim=1)
-                else:
-                    score_pha_ = score_pha
-
-                score_decom = torch.complex(
-                    score_mag_ * torch.cos(score_pha_), score_mag_ * torch.sin(score_pha_)
-                )
-                score_wav = torch.istft(
-                    score_decom,
-                    n_fft=self.n_fft,
-                    hop_length=self.hop_size,
-                    win_length=self.win_size,
-                    center=True,
-                    length=real_len,
-                )
+                score_wav = self._ri_score_to_wav(score, real_len)
 
                 if self.use_gan:
                     _, y_df_g, fmap_f_r, fmap_f_g = self.mpd(x_audio, score_wav)
@@ -462,47 +508,29 @@ class NsfBridgeScoreModel(pl.LightningModule):
                     x_spec = self._stft_audio(x_audio)  # (B,F,T)
                     if self.drop_last_freq:
                         x_spec = x_spec[:, :-1].contiguous()
+                    x_spec = self._spec_fwd(x_spec)
                     x_ri = torch.stack([x_spec.real, x_spec.imag], dim=1)
 
-                    # 条件谱 Y
-                    cond_full = self.dnn.build_cond(mel, f0)
+                    # 条件谱 Y（同样在压缩谱空间）
+                    cond_full_ri = self.dnn.build_cond(mel, f0)
                     if self.drop_last_freq:
-                        cond_full = cond_full[:, :, :-1].contiguous()
+                        cond_full_ri = cond_full_ri[:, :, :-1].contiguous()
+                    cond_spec = torch.complex(cond_full_ri[:, 0], cond_full_ri[:, 1])
+                    cond_spec = self._spec_fwd(cond_spec)
+                    cond_full = torch.stack([cond_spec.real, cond_spec.imag], dim=1)
+
                     T_common = min(x_ri.shape[-1], cond_full.shape[-1])
                     x_ri = x_ri[..., :T_common]
                     cond_full = cond_full[..., :T_common]
 
-                    # BridgeGAN 扩散 + score 预测
+                    # BridgeGAN 扩散 + score 预测（同训练）
                     t = torch.rand(x_ri.shape[0], dtype=x_ri.dtype, device=x_ri.device, requires_grad=False)
                     t = torch.clamp(t, self.sde.offset, 1.0 - self.sde.offset)
                     xt, target = self.sde.forward_diffusion(x0=x_ri, x1=cond_full, t=t)
                     score = self(xt, t, cond_full)
 
-                    score_mag = torch.norm(score, dim=1)  # (B,F,T)
-                    if self.drop_last_freq:
-                        last_mag = score_mag[:, -1, None]
-                        score_mag_ = torch.cat([score_mag, last_mag], dim=1)
-                    else:
-                        score_mag_ = score_mag
-                    score_pha = torch.atan2(score[:, -1], score[:, 0])
-                    if self.drop_last_freq:
-                        last_pha = score_pha[:, -1, None]
-                        score_pha_ = torch.cat([score_pha, last_pha], dim=1)
-                    else:
-                        score_pha_ = score_pha
-
-                    score_decom = torch.complex(
-                        score_mag_ * torch.cos(score_pha_), score_mag_ * torch.sin(score_pha_)
-                    )
                     real_len = x_audio.shape[-1]
-                    score_wav = torch.istft(
-                        score_decom,
-                        n_fft=self.n_fft,
-                        hop_length=self.hop_size,
-                        win_length=self.win_size,
-                        center=True,
-                        length=real_len,
-                    )
+                    score_wav = self._ri_score_to_wav(score, real_len)
 
                     def _stft_log(spec_audio: torch.Tensor) -> torch.Tensor:
                         """

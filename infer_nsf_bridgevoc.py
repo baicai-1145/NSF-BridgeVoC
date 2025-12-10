@@ -37,6 +37,12 @@ def _parse_args() -> argparse.Namespace:
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="推理设备，默认为 cuda（若可用），否则 cpu",
     )
+    parser.add_argument(
+        "--N",
+        type=int,
+        default=None,
+        help="可选：覆盖模型 SDE 的采样步数 N（不写则使用训练时的 N）",
+    )
     return parser.parse_args()
 
 
@@ -50,7 +56,7 @@ def _extract_mel_f0_from_wav(
     fmax: float,
     num_mels: int,
     device: str,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, float]:
     """
     从单个 wav 中提取 mel 频谱与 F0（使用 torchfcpe），返回:
       mel: (1, num_mels, frames)
@@ -84,6 +90,9 @@ def _extract_mel_f0_from_wav(
     else:
         audio = audio[:target_len]
 
+    # 记录与模型输入对齐后的参考峰值，用于推理后响度匹配
+    ref_peak = float(np.max(np.abs(audio)) + 1e-8)
+
     # 使用 torchfcpe 提取 F0，并对齐到 frames
     f0 = extract_f0_fcpe(
         audio,
@@ -98,7 +107,7 @@ def _extract_mel_f0_from_wav(
 
     mel = mel.unsqueeze(0)  # (1, num_mels, frames)
     f0_t = torch.from_numpy(f0).unsqueeze(0)  # (1, frames)
-    return mel, f0_t
+    return mel, f0_t, ref_peak
 
 
 @torch.no_grad()
@@ -116,6 +125,11 @@ def main():
     # 这里显式传 no_ema=True，确保不会在 eval() 时用随机 shadow_params 覆盖已训练好的 dnn 权重。
     model.eval(no_ema=True)
 
+    # 如有需要，允许通过命令行覆盖采样步数 N
+    if args.N is not None:
+        print(f"[INFO] Override SDE.N: {model.sde.N} -> {args.N}")
+        model.sde.N = int(args.N)
+
     # 2) 从 wav 提取 mel + F0（torchfcpe）
     sr = model.sampling_rate
     n_fft = model.n_fft
@@ -125,7 +139,7 @@ def main():
     fmax = model.fmax
     num_mels = model.num_mels
 
-    mel, f0 = _extract_mel_f0_from_wav(
+    mel, f0, ref_peak = _extract_mel_f0_from_wav(
         args.wav,
         sampling_rate=sr,
         n_fft=n_fft,
@@ -173,7 +187,18 @@ def main():
         center=True,
         length=target_len,
     )
-    wav = wav.squeeze().cpu().numpy()
+    wav = wav.squeeze().cpu().numpy().astype(np.float32)
+
+    # 6) 响度匹配与限幅：
+    #    - 将模型输出的峰值对齐到输入片段的峰值；
+    #    - 同时限制最大幅度不超过 0.95，避免>0 dBFS 的硬剪裁。
+    out_peak = float(np.max(np.abs(wav)) + 1e-8)
+    if out_peak > 0.0:
+        if ref_peak > 0.0:
+            target_peak = min(ref_peak, 0.95)
+        else:
+            target_peak = 0.95
+        wav = wav * (target_peak / out_peak)
 
     out_dir = os.path.dirname(args.out)
     if out_dir:

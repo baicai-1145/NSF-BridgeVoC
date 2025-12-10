@@ -12,36 +12,54 @@ from div.nsf_bridge.score_model import NsfBridgeScoreModel
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="NSF-BridgeVoc 推理脚本（wav -> mel + F0[torchfcpe] -> wav）")
+    parser = argparse.ArgumentParser(description="NSF-BridgeVoc inference script (wav -> mel + F0[torchfcpe] -> wav)")
     parser.add_argument(
         "--ckpt",
         type=str,
         required=True,
-        help="训练好的 NSF-BridgeVoc 检查点路径（Lightning .ckpt）",
+        help="Path to the trained NSF-BridgeVoc checkpoint (.ckpt from Lightning).",
     )
     parser.add_argument(
         "--wav",
         type=str,
         required=True,
-        help="待重建的输入 wav 路径，将自动用 mel_spectrogram + torchfcpe 提取特征",
+        help="Input wav path; mel_spectrogram and torchfcpe features will be computed automatically.",
     )
     parser.add_argument(
         "--out",
         type=str,
         default="test_decode/nsf_bridgevoc_out.wav",
-        help="输出合成 wav 保存路径",
+        help="Output path to save the synthesized wav.",
     )
     parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
-        help="推理设备，默认为 cuda（若可用），否则 cpu",
+        help="Inference device, defaults to cuda when available.",
     )
     parser.add_argument(
         "--N",
         type=int,
         default=None,
-        help="可选：覆盖模型 SDE 的采样步数 N（不写则使用训练时的 N）",
+        help="Optional: override the model SDE sampling steps N (default uses training N).",
+    )
+    parser.add_argument(
+        "--chunk-frames",
+        type=int,
+        default=None,
+        help="Optional: number of mel frames per chunk for memory-friendly inference.",
+    )
+    parser.add_argument(
+        "--chunk-seconds",
+        type=float,
+        default=None,
+        help="Optional: chunk length in seconds (ignored if --chunk-frames is set).",
+    )
+    parser.add_argument(
+        "--crossfade-seconds",
+        type=float,
+        default=0.12,
+        help="Optional: cross-fade duration in seconds when stitching chunked outputs; set 0 to disable overlap.",
     )
     return parser.parse_args()
 
@@ -110,6 +128,110 @@ def _extract_mel_f0_from_wav(
     return mel, f0_t, ref_peak
 
 
+def _build_cond(model: NsfBridgeScoreModel, mel: torch.Tensor, f0: torch.Tensor) -> torch.Tensor:
+    """Build conditioning features for the score model."""
+    cond_full_ri = model.dnn.build_cond(mel, f0)  # (B, 2, F_full, T)
+    if model.drop_last_freq:
+        cond_full_ri = cond_full_ri[:, :, :-1].contiguous()  # (B, 2, F-1, T)
+
+    cond_complex = torch.complex(cond_full_ri[:, 0], cond_full_ri[:, 1])  # (B, F-1, T)
+    cond_complex = model._spec_fwd(cond_complex)
+    cond = torch.stack([cond_complex.real, cond_complex.imag], dim=1)  # (B, 2, F-1, T)
+    return cond
+
+
+def _reverse_to_wav(
+    model: NsfBridgeScoreModel,
+    cond: torch.Tensor,
+    n_fft: int,
+    hop_size: int,
+    win_size: int,
+    window: torch.Tensor,
+) -> np.ndarray:
+    """Run reverse diffusion on a single chunk and convert to waveform."""
+    sample_ri = model.sde.reverse_diffusion(cond, cond, model.dnn, to_cpu=False)  # (B, 2, F-1, T)
+
+    sample_complex = torch.complex(sample_ri[:, 0], sample_ri[:, 1])  # (B, F-1, T)
+    if model.drop_last_freq:
+        last = sample_complex[:, -1:, :].contiguous()
+        sample_complex = torch.cat([sample_complex, last], dim=1)  # (B, F, T)
+
+    spec = model._spec_back(sample_complex)
+
+    target_len = spec.shape[-1] * hop_size
+    wav = torch.istft(
+        spec,
+        n_fft=n_fft,
+        hop_length=hop_size,
+        win_length=win_size,
+        window=window,
+        center=True,
+        length=target_len,
+    )
+    return wav.squeeze().cpu().numpy().astype(np.float32)
+
+
+def _crossfade_concat(accum: np.ndarray, chunk: np.ndarray, crossfade_samples: int) -> np.ndarray:
+    """Append chunk to accum with linear cross-fade over the overlap."""
+    if accum.size == 0:
+        return chunk
+    if crossfade_samples <= 0:
+        return np.concatenate([accum, chunk])
+
+    overlap = min(crossfade_samples, accum.shape[0], chunk.shape[0])
+    if overlap == 0:
+        return np.concatenate([accum, chunk])
+
+    fade_out = np.linspace(1.0, 0.0, overlap, endpoint=False, dtype=np.float32)
+    fade_in = np.linspace(0.0, 1.0, overlap, endpoint=False, dtype=np.float32)
+    mixed = accum[-overlap:] * fade_out + chunk[:overlap] * fade_in
+    return np.concatenate([accum[:-overlap], mixed, chunk[overlap:]])
+
+
+def _chunked_infer(
+    model: NsfBridgeScoreModel,
+    mel: torch.Tensor,
+    f0: torch.Tensor,
+    n_fft: int,
+    hop_size: int,
+    win_size: int,
+    chunk_frames: int,
+    overlap_frames: int,
+) -> np.ndarray:
+    """Run memory-friendly inference by chunking along the time dimension."""
+    total_frames = mel.shape[-1]
+    overlap_frames = max(0, min(overlap_frames, chunk_frames - 1))
+    step = max(1, chunk_frames - overlap_frames)
+    window = torch.hann_window(win_size, device=mel.device)
+
+    wav_out = np.zeros(0, dtype=np.float32)
+    start = 0
+    chunk_idx = 0
+
+    while start < total_frames:
+        end = min(start + chunk_frames, total_frames)
+        mel_chunk = mel[..., start:end].contiguous()
+        f0_chunk = f0[..., start:end].contiguous()
+
+        chunk_idx += 1
+        print(
+            f"[INFO] Decoding chunk {chunk_idx}: frames {start} - {end} / {total_frames} "
+            f"(len={end - start}, overlap={overlap_frames})"
+        )
+
+        cond_chunk = _build_cond(model, mel_chunk, f0_chunk)
+        wav_chunk = _reverse_to_wav(model, cond_chunk, n_fft, hop_size, win_size, window)
+
+        wav_out = _crossfade_concat(wav_out, wav_chunk, overlap_frames * hop_size)
+        start = end if end == total_frames else start + step
+
+        # Free cached blocks between chunks to mitigate OOM on small GPUs.
+        if torch.cuda.is_available() and mel.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    return wav_out
+
+
 @torch.no_grad()
 def main():
     args = _parse_args()
@@ -154,40 +276,43 @@ def main():
     f0 = f0.to(device)
     print(f"[INFO] mel shape={mel.shape}, f0 shape={f0.shape}")
 
-    # 3) 由 mel + F0 构造条件谱 Y，并在复杂谱域做与训练完全一致的谱压缩
-    cond_full_ri = model.dnn.build_cond(mel, f0)  # (1, 2, F_full, T)
-    if model.drop_last_freq:
-        cond_full_ri = cond_full_ri[:, :, :-1].contiguous()  # (1, 2, F-1, T)
+    # 3) 选择全长或分片推理，分片时用交叉淡化拼接，缓解小显存 OOM
+    window = torch.hann_window(win_size, device=device)
 
-    cond_complex = torch.complex(cond_full_ri[:, 0], cond_full_ri[:, 1])  # (1, F-1, T)
-    cond_complex = model._spec_fwd(cond_complex)
-    cond = torch.stack([cond_complex.real, cond_complex.imag], dim=1)  # (1, 2, F-1, T)
+    chunk_frames = None
+    if args.chunk_frames is not None and args.chunk_frames > 0:
+        chunk_frames = int(args.chunk_frames)
+    elif args.chunk_seconds is not None and args.chunk_seconds > 0:
+        chunk_frames = int(round(args.chunk_seconds * sr / hop_size))
 
-    # 4) BridgeGAN 逆扩散：从条件谱 Y 出发，通过 score 网络恢复目标谱 X
-    print(f"[INFO] Running BridgeGAN reverse diffusion with N={model.sde.N}")
-    sample_ri = model.sde.reverse_diffusion(
-        cond, cond, model.dnn, to_cpu=False
-    )  # (1, 2, F-1, T)
+    if chunk_frames is not None and chunk_frames > 0 and chunk_frames < mel.shape[-1]:
+        overlap_frames = int(round(max(args.crossfade_seconds, 0.0) * sr / hop_size))
+        overlap_frames = max(0, min(overlap_frames, chunk_frames - 1))
+        if chunk_frames - overlap_frames <= 0:
+            overlap_frames = max(0, chunk_frames - 1)
 
-    # 5) 与训练相同的反变换流程：压缩谱 -> 原始 STFT -> 波形
-    sample_complex = torch.complex(sample_ri[:, 0], sample_ri[:, 1])  # (1, F-1, T)
-    if model.drop_last_freq:
-        last = sample_complex[:, -1:, :].contiguous()
-        sample_complex = torch.cat([sample_complex, last], dim=1)  # (1, F, T)
+        print(
+            "[INFO] Chunked inference enabled: "
+            f"chunk_frames={chunk_frames}, overlap_frames={overlap_frames} "
+            f"(~{chunk_frames * hop_size / sr:.2f}s chunk, ~{overlap_frames * hop_size / sr:.2f}s overlap)"
+        )
+        wav = _chunked_infer(
+            model,
+            mel,
+            f0,
+            n_fft,
+            hop_size,
+            win_size,
+            chunk_frames=chunk_frames,
+            overlap_frames=overlap_frames,
+        )
+    else:
+        if chunk_frames is not None and chunk_frames >= mel.shape[-1]:
+            print("[WARN] chunk size >= total length, falling back to single-shot inference.")
 
-    spec = model._spec_back(sample_complex)
-
-    target_len = spec.shape[-1] * hop_size
-    wav = torch.istft(
-        spec,
-        n_fft=n_fft,
-        hop_length=hop_size,
-        win_length=win_size,
-        window=torch.hann_window(win_size).to(spec.device),
-        center=True,
-        length=target_len,
-    )
-    wav = wav.squeeze().cpu().numpy().astype(np.float32)
+        cond = _build_cond(model, mel, f0)
+        print(f"[INFO] Running BridgeGAN reverse diffusion with N={model.sde.N}")
+        wav = _reverse_to_wav(model, cond, n_fft, hop_size, win_size, window)
 
     # 6) 响度匹配与限幅：
     #    - 将模型输出的峰值对齐到输入片段的峰值；

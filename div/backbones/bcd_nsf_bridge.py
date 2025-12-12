@@ -52,6 +52,16 @@ class NsfBcdBridge(nn.Module):
             default=0.0,
             help="F0 > voiced_threshold 视为有声，用于 NSF 源的 uv 判定。",
         )
+        parser.add_argument(
+            "--phase_mask_ratio",
+            type=float,
+            default=0.1,
+            help=(
+                "将 NSF 源相位仅应用于其能量较强的频点："
+                "mask = mag_src > phase_mask_ratio * max(mag_src, freq). "
+                "其余频点相位使用 0，以减少“坑洞/闷/电流声”。"
+            ),
+        )
         return parser
 
     def __init__(
@@ -85,6 +95,7 @@ class NsfBcdBridge(nn.Module):
         sine_amp: float = 0.1,
         add_noise_std: float = 0.003,
         voiced_threshold: float = 0.0,
+        phase_mask_ratio: float = 0.1,
         **unused_kwargs: Any,
     ):
         super().__init__()
@@ -106,6 +117,8 @@ class NsfBcdBridge(nn.Module):
             add_noise_std=add_noise_std,
             voiced_threshold=voiced_threshold,
         )
+        self.voiced_threshold = voiced_threshold
+        self.phase_mask_ratio = float(phase_mask_ratio)
 
         # BCD 子带网络作为 STFT 域解码器（结构与 bridge-only 完全一致）
         self.bcd = BCD(
@@ -164,6 +177,7 @@ class NsfBcdBridge(nn.Module):
 
         # 2) STFT 得到激励的相位
         spec_src = self._stft(har_source)  # (B, F, T_src)
+        mag_src = spec_src.abs()
         pha_src = torch.angle(spec_src)
 
         # 3) 由 mel 近似恢复幅度谱
@@ -182,13 +196,30 @@ class NsfBcdBridge(nn.Module):
 
         # 4) 对齐时间维度（通常 T_src ≈ T_mel）
         T_common = min(spec_src.shape[-1], mag_mel.shape[-1])
-        spec_src = spec_src[..., :T_common]
+        mag_src = mag_src[..., :T_common]
         pha_src = pha_src[..., :T_common]
         mag_mel = mag_mel[..., :T_common]
 
-        # 5) 组合 NSF 相位 + mel 幅度，作为条件谱
+        # 5) 相位注入策略（借鉴 SingingVocoders/NSF 思路）：
+        #    NSF 谐波源的频谱非常稀疏，在能量接近 0 的频点上 angle() 近似随机。
+        #    若将其“涂满全频”作为 mel 幅度谱的相位，会导致频谱坑洞、闷、嘶嘶/电流感。
+        #    因此仅在 NSF 源能量较强的频点使用其相位，其余频点相位置 0。
+        #    同时在 unvoiced 帧也不注入相位（相位置 0）。
+        if self.phase_mask_ratio > 0.0:
+            # per-frame max over freq: (B, 1, T)
+            max_mag = mag_src.amax(dim=-2, keepdim=True).clamp_min(1e-8)
+            pha_mask = mag_src > (self.phase_mask_ratio * max_mag)  # (B, F, T)
+        else:
+            pha_mask = torch.ones_like(mag_src, dtype=torch.bool)
+
+        # uv mask: (B, 1, T), unvoiced 不注入相位
+        uv = (f0 > self.voiced_threshold).to(mag_src.dtype)  # (B, frames)
+        uv = uv[..., :T_common].unsqueeze(1)  # (B, 1, T)
+        pha_mask = pha_mask & (uv > 0.5)
+
+        pha_used = torch.where(pha_mask, pha_src, torch.zeros_like(pha_src))
         cond_spec = torch.complex(
-            mag_mel * torch.cos(pha_src), mag_mel * torch.sin(pha_src)
+            mag_mel * torch.cos(pha_used), mag_mel * torch.sin(pha_used)
         )  # (B, F, T)
         cond_ri = torch.stack([cond_spec.real, cond_spec.imag], dim=1)  # (B, 2, F, T)
         return cond_ri
@@ -209,4 +240,3 @@ class NsfBcdBridge(nn.Module):
         return: (B, 2, F, T)，预测的 score / 目标谱残差
         """
         return self.bcd(inpt, cond=cond, time_cond=time_cond)
-

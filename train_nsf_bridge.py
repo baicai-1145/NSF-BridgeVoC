@@ -125,6 +125,7 @@ def main():
         sine_amp=model_cfg.get("sine_amp", 0.1),
         add_noise_std=model_cfg.get("add_noise_std", 0.003),
         voiced_threshold=model_cfg.get("voiced_threshold", 0.0),
+        phase_mask_ratio=model_cfg.get("phase_mask_ratio", 0.1),
     )
 
     # 日志与检查点

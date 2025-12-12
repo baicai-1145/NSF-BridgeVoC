@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 from typing import Tuple
 
 import numpy as np
@@ -60,6 +61,17 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=0.12,
         help="Optional: cross-fade duration in seconds when stitching chunked outputs; set 0 to disable overlap.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional: set a random seed for deterministic reverse diffusion sampling.",
+    )
+    parser.add_argument(
+        "--no_ema",
+        action="store_true",
+        help="Disable EMA weights for inference (default uses EMA if available in the checkpoint).",
     )
     return parser.parse_args()
 
@@ -237,6 +249,17 @@ def main():
     args = _parse_args()
     device = torch.device(args.device)
 
+    # Optional deterministic sampling for reproducible comparisons / deployment.
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        print(f"[INFO] Set random seed to {args.seed} for deterministic sampling.")
+
     # 1) 从 Lightning ckpt 加载完整的 NSF-Bridge Score 模型（包含 SDE + NsfBcdBridge）
     print(f"[INFO] Loading NsfBridgeScoreModel from {args.ckpt}")
     model = NsfBridgeScoreModel.load_from_checkpoint(
@@ -245,7 +268,9 @@ def main():
     model.to(device)
     # 推理场景下：若 ckpt 中没有保存 EMA（老模型），会在 on_load_checkpoint 里自动关闭 EMA；
     # 这里显式传 no_ema=True，确保不会在 eval() 时用随机 shadow_params 覆盖已训练好的 dnn 权重。
-    model.eval(no_ema=True)
+    # By default, use EMA weights if available in the checkpoint for cleaner audio.
+    # For older checkpoints without EMA, NsfBridgeScoreModel will automatically disable EMA.
+    model.eval(no_ema=args.no_ema)
 
     # 如有需要，允许通过命令行覆盖采样步数 N
     if args.N is not None:

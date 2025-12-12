@@ -80,3 +80,5 @@ model:
   sine_amp: 0.1
   add_noise_std: 0.003
   voiced_threshold: 0.0
+  # 仅在 NSF 源能量较强的频点注入相位，减少“坑洞/闷/嘶嘶声”
+  phase_mask_ratio: 0.1

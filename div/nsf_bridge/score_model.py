@@ -94,6 +94,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
         sine_amp: float = 0.1,
         add_noise_std: float = 0.003,
         voiced_threshold: float = 0.0,
+        phase_mask_ratio: float = 0.1,
     ):
         super().__init__()
 
@@ -152,6 +153,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
             sine_amp=sine_amp,
             add_noise_std=add_noise_std,
             voiced_threshold=voiced_threshold,
+            phase_mask_ratio=phase_mask_ratio,
         )
 
         # GAN 判别器（与 ScoreModelGAN 相同）

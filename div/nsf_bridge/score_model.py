@@ -382,11 +382,13 @@ class NsfBridgeScoreModel(pl.LightningModule):
             last_band = score_complex[:, -1:, :].contiguous()
             score_complex = torch.cat([score_complex, last_band], dim=1)  # (B, F, T)
         score_complex = self._spec_back(score_complex)
+        window = torch.hann_window(self.win_size, device=score_complex.device)
         score_wav = torch.istft(
             score_complex,
             n_fft=self.n_fft,
             hop_length=self.hop_size,
             win_length=self.win_size,
+            window=window,
             center=True,
             length=real_len,
         )

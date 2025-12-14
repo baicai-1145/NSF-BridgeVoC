@@ -554,7 +554,6 @@ class NsfBridgeScoreModel(pl.LightningModule):
                 import matplotlib.pyplot as plt
 
                 audio = batch["audio"].to(self.device)  # (B,1,L)
-                mel = batch["mel"].to(self.device)
                 f0 = batch["f0"].to(self.device)
                 x_audio = audio.squeeze(1)  # (B,L)
 
@@ -562,6 +561,14 @@ class NsfBridgeScoreModel(pl.LightningModule):
                 with torch.no_grad():
                     # 目标谱 X
                     x_spec = self._stft_audio(x_audio)  # (B,F,T)
+
+                    mel = batch.get("mel", None)
+                    if mel is None:
+                        mel_mag = torch.matmul(self.mel_basis, x_spec.abs())
+                        mel = spectral_normalize_torch(mel_mag)
+                    else:
+                        mel = mel.to(self.device)
+
                     if self.drop_last_freq:
                         x_spec = x_spec[:, :-1].contiguous()
                     x_spec = self._spec_fwd(x_spec)
@@ -595,7 +602,9 @@ class NsfBridgeScoreModel(pl.LightningModule):
                         win_size = self.win_size
                         n_fft = self.n_fft
                         hop = self.hop_size
-                        window = torch.hann_window(win_size, device=spec_audio.device)
+                        window = self.stft_window
+                        if window.device != spec_audio.device:
+                            window = window.to(spec_audio.device)
                         y = F.pad(
                             spec_audio.unsqueeze(1),
                             (int((win_size - hop) // 2), int((win_size - hop + 1) // 2)),

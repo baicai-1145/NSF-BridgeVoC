@@ -121,6 +121,10 @@ class NsfBridgeScoreModel(pl.LightningModule):
         self.spec_abs_exponent = spec_abs_exponent
         self.transform_type = transform_type
 
+        self.register_buffer(
+            "stft_window", torch.hann_window(self.win_size, periodic=True), persistent=False
+        )
+
         try:
             from librosa.filters import mel as librosa_mel_fn
         except Exception as e:
@@ -328,7 +332,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
         score_wav: (B, L)
         x_wav: (B, L)
         """
-        loss_val_dict: Dict[str, float] = {}
+        loss_val_dict: Dict[str, torch.Tensor] = {}
         total = 0.0
         for k in self.loss_type_list:
             k_low = k.lower().split(":")[0] if ":" in k else k.lower()
@@ -343,7 +347,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
                 total = total + self.weight_dict[k_low] * cur_loss
             else:
                 continue
-            loss_val_dict[k_low] = float(cur_loss.item())
+            loss_val_dict[k_low] = cur_loss.detach()
         return total, loss_val_dict
 
     # ----------------- Core forward / training step -----------------
@@ -360,7 +364,9 @@ class NsfBridgeScoreModel(pl.LightningModule):
         audio: (B, L)
         返回 complex STFT: (B, F, T)
         """
-        window = torch.hann_window(self.win_size).to(audio.device)
+        window = self.stft_window
+        if window.device != audio.device:
+            window = window.to(audio.device)
         spec = torch.stft(
             audio,
             self.n_fft,
@@ -419,7 +425,9 @@ class NsfBridgeScoreModel(pl.LightningModule):
             last_band = torch.zeros_like(score_complex[:, :1, :]).contiguous()
             score_complex = torch.cat([score_complex, last_band], dim=1)  # (B, F, T)
         score_complex = self._spec_back(score_complex)
-        window = torch.hann_window(self.win_size, device=score_complex.device)
+        window = self.stft_window
+        if window.device != score_complex.device:
+            window = window.to(score_complex.device)
         score_wav = torch.istft(
             score_complex,
             n_fft=self.n_fft,
@@ -446,7 +454,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
 
         mel = batch.get("mel", None)
         if mel is None:
-            mel_mag = torch.matmul(self.mel_basis.to(x_spec.device), x_spec.abs())
+            mel_mag = torch.matmul(self.mel_basis, x_spec.abs())
             mel = spectral_normalize_torch(mel_mag)
         else:
             mel = mel.to(self.device)  # (B, num_mels, frames)

@@ -377,8 +377,8 @@ class BCD(nn.Module):
          x8 = x8 + self.alpha8 * enc8
          d8_r, d8_i = self.refine8_dec(x8, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
 
-         out[:, 0:1, self.refine8_start:self.refine8_end, :] = out[:, 0:1, self.refine8_start:self.refine8_end, :] + self.refine8_weight * d8_r
-         out[:, 1:2, self.refine8_start:self.refine8_end, :] = out[:, 1:2, self.refine8_start:self.refine8_end, :] + self.refine8_weight * d8_i
+         out[:, 0:1, self.refine8_start:self.refine8_end, :].add_(self.refine8_weight * d8_r)
+         out[:, 1:2, self.refine8_start:self.refine8_end, :].add_(self.refine8_weight * d8_i)
 
          x4_in = inpt_spec[..., self.refine4_start:self.refine4_end, :]
          enc4 = self.refine4_enc(x4_in, time_ada_begin=time_ada_begin)
@@ -386,7 +386,7 @@ class BCD(nn.Module):
          x4 = x4 + self.alpha4 * enc4
          d4_r, d4_i = self.refine4_dec(x4, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
 
-         out[:, 0:1, self.refine4_start:self.refine4_end, :] = out[:, 0:1, self.refine4_start:self.refine4_end, :] + self.refine4_weight * d4_r
-         out[:, 1:2, self.refine4_start:self.refine4_end, :] = out[:, 1:2, self.refine4_start:self.refine4_end, :] + self.refine4_weight * d4_i
+         out[:, 0:1, self.refine4_start:self.refine4_end, :].add_(self.refine4_weight * d4_r)
+         out[:, 1:2, self.refine4_start:self.refine4_end, :].add_(self.refine4_weight * d4_i)
 
       return out

@@ -537,7 +537,14 @@ class NsfBridgeScoreModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         loss, loss_val_dict = self._step(batch, batch_idx)
         for k, v in loss_val_dict.items():
-            self.log(f"train_loss_{k}", v, on_step=True, on_epoch=True, batch_size=batch["audio"].shape[0])
+            self.log(
+                f"train_loss_{k}",
+                v,
+                on_step=True,
+                on_epoch=False,
+                batch_size=batch["audio"].shape[0],
+                prog_bar=False,
+            )
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -545,7 +552,14 @@ class NsfBridgeScoreModel(pl.LightningModule):
         # 传入 batch_idx=1 可避免 _step 中判别器更新分支被触发（与 ScoreModelGAN 保持一致）。
         loss, loss_val_dict = self._step(batch, 1)
         for k, v in loss_val_dict.items():
-            self.log(f"valid_loss_{k}", v, on_step=False, on_epoch=True, batch_size=batch["audio"].shape[0])
+            self.log(
+                f"valid_loss_{k}",
+                v,
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch["audio"].shape[0],
+                prog_bar=False,
+            )
         # 仅在第一个 batch 上做可视化，避免开销过大
         if batch_idx == 0 and hasattr(self.logger, "experiment"):
             try:

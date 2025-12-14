@@ -443,8 +443,8 @@ class NsfBridgeScoreModel(pl.LightningModule):
         """
         batch: dict(audio=(B,1,L), mel=(B,num_mels,frames), f0=(B,frames))
         """
-        audio = batch["audio"].to(self.device)  # (B, 1, L)
-        f0 = batch["f0"].to(self.device)  # (B, frames)
+        audio = batch["audio"].to(self.device, non_blocking=True)  # (B, 1, L)
+        f0 = batch["f0"].to(self.device, non_blocking=True)  # (B, frames)
 
         x_audio = audio.squeeze(1)  # (B, L)
         real_len = x_audio.shape[-1]
@@ -457,7 +457,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
             mel_mag = torch.matmul(self.mel_basis, x_spec.abs())
             mel = spectral_normalize_torch(mel_mag)
         else:
-            mel = mel.to(self.device)  # (B, num_mels, frames)
+            mel = mel.to(self.device, non_blocking=True)  # (B, num_mels, frames)
 
         if self.drop_last_freq:
             x_spec = x_spec[:, :-1].contiguous()
@@ -553,8 +553,8 @@ class NsfBridgeScoreModel(pl.LightningModule):
                 import torch.nn.functional as F
                 import matplotlib.pyplot as plt
 
-                audio = batch["audio"].to(self.device)  # (B,1,L)
-                f0 = batch["f0"].to(self.device)
+                audio = batch["audio"].to(self.device, non_blocking=True)  # (B,1,L)
+                f0 = batch["f0"].to(self.device, non_blocking=True)
                 x_audio = audio.squeeze(1)  # (B,L)
 
                 # 重新构造一次 score_wav，用于可视化（不影响损失）
@@ -567,7 +567,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
                         mel_mag = torch.matmul(self.mel_basis, x_spec.abs())
                         mel = spectral_normalize_torch(mel_mag)
                     else:
-                        mel = mel.to(self.device)
+                        mel = mel.to(self.device, non_blocking=True)
 
                     if self.drop_last_freq:
                         x_spec = x_spec[:, :-1].contiguous()

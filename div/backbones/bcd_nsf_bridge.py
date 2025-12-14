@@ -198,7 +198,8 @@ class NsfBcdBridge(nn.Module):
         ).abs().clamp_min_(1e-6)  # (B, F, T_mel)
 
         # 4) 对齐时间维度（通常 T_src ≈ T_mel）
-        T_common = min(spec_src.shape[-1], mag_mel.shape[-1])
+        # 同时考虑 F0/uv 的长度，避免后续 mask 在时间维上 mismatch。
+        T_common = min(spec_src.shape[-1], mag_mel.shape[-1], f0.shape[-1])
         mag_src = mag_src[..., :T_common]
         pha_src = pha_src[..., :T_common]
         mag_mel = mag_mel[..., :T_common]

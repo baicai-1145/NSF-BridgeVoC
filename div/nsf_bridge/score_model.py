@@ -20,6 +20,7 @@ from div.util.loss import (
     DiscriminatorLoss,
     GeneratorLoss,
 )
+from div.data_module import spectral_normalize_torch
 
 
 class NsfBridgeScoreModel(pl.LightningModule):
@@ -119,6 +120,20 @@ class NsfBridgeScoreModel(pl.LightningModule):
         self.spec_factor = spec_factor
         self.spec_abs_exponent = spec_abs_exponent
         self.transform_type = transform_type
+
+        try:
+            from librosa.filters import mel as librosa_mel_fn
+        except Exception as e:
+            raise ImportError("librosa is required for NsfBridgeScoreModel mel basis.") from e
+
+        mel = librosa_mel_fn(
+            sr=self.sampling_rate,
+            n_fft=self.n_fft,
+            n_mels=self.num_mels,
+            fmin=self.fmin,
+            fmax=self.fmax,
+        )
+        self.register_buffer("mel_basis", torch.from_numpy(mel).float(), persistent=False)
 
         # SDE：BridgeGAN
         self.sde = BridgeGAN(
@@ -421,7 +436,6 @@ class NsfBridgeScoreModel(pl.LightningModule):
         batch: dict(audio=(B,1,L), mel=(B,num_mels,frames), f0=(B,frames))
         """
         audio = batch["audio"].to(self.device)  # (B, 1, L)
-        mel = batch["mel"].to(self.device)  # (B, num_mels, frames)
         f0 = batch["f0"].to(self.device)  # (B, frames)
 
         x_audio = audio.squeeze(1)  # (B, L)
@@ -429,6 +443,14 @@ class NsfBridgeScoreModel(pl.LightningModule):
 
         # 1) 目标谱 X：由真实音频 STFT 得到
         x_spec = self._stft_audio(x_audio)  # (B, F, T)
+
+        mel = batch.get("mel", None)
+        if mel is None:
+            mel_mag = torch.matmul(self.mel_basis.to(x_spec.device), x_spec.abs())
+            mel = spectral_normalize_torch(mel_mag)
+        else:
+            mel = mel.to(self.device)  # (B, num_mels, frames)
+
         if self.drop_last_freq:
             x_spec = x_spec[:, :-1].contiguous()
         x_spec = self._spec_fwd(x_spec)

@@ -33,6 +33,7 @@ class NsfBridgeDataset(Dataset):
         num_mels: int,
         num_frames: int,
         subset: str = "train",
+        compute_mel_in_dataset: bool = True,
     ):
         super().__init__()
         self.raw_wav_root = raw_wav_root
@@ -46,6 +47,7 @@ class NsfBridgeDataset(Dataset):
         self.num_mels = num_mels
         self.num_frames = num_frames
         self.subset = subset
+        self.compute_mel_in_dataset = bool(compute_mel_in_dataset)
 
         with open(filelist_path, "r", encoding="utf-8") as f:
             lines = [l.strip() for l in f.readlines() if l.strip()]
@@ -94,24 +96,31 @@ class NsfBridgeDataset(Dataset):
         audio = np.asarray(audio, dtype=np.float32)
         audio = np.clip(audio, -1.0, 1.0)
 
-        audio_t = torch.from_numpy(audio).unsqueeze(0)
-        mel = mel_spectrogram(
-            audio_t,
-            n_fft=self.n_fft,
-            num_mels=self.num_mels,
-            sampling_rate=self.sampling_rate,
-            hop_size=self.hop_size,
-            win_size=self.win_size,
-            fmin=self.fmin,
-            fmax=self.fmax,
-            center=True,
-            in_dataset=True,
-        )[0]
+        f0_full = self._load_f0_full(rel)
 
-        total_frames = mel.shape[1]
-        if self.subset == "train" and self.num_frames > 0 and total_frames < self.num_frames:
-            new_idx = (idx + 1) % len(self.wav_files)
-            return self.__getitem__(new_idx)
+        if self.compute_mel_in_dataset:
+            audio_t = torch.from_numpy(audio).unsqueeze(0)
+            mel_full = mel_spectrogram(
+                audio_t,
+                n_fft=self.n_fft,
+                num_mels=self.num_mels,
+                sampling_rate=self.sampling_rate,
+                hop_size=self.hop_size,
+                win_size=self.win_size,
+                fmin=self.fmin,
+                fmax=self.fmax,
+                center=True,
+                in_dataset=True,
+            )[0]
+            total_frames = mel_full.shape[1]
+            if self.subset == "train" and self.num_frames > 0 and total_frames < self.num_frames:
+                new_idx = (idx + 1) % len(self.wav_files)
+                return self.__getitem__(new_idx)
+        else:
+            total_frames = int(f0_full.shape[0])
+            if self.subset == "train" and self.num_frames > 0 and total_frames < self.num_frames:
+                new_idx = (idx + 1) % len(self.wav_files)
+                return self.__getitem__(new_idx)
 
         if self.num_frames > 0 and total_frames > self.num_frames:
             if self.subset == "train":
@@ -123,8 +132,9 @@ class NsfBridgeDataset(Dataset):
             start = 0
             end = total_frames
 
-        mel = mel[:, start:end]
-        frames = mel.shape[1]
+        frames = end - start
+        if self.compute_mel_in_dataset:
+            mel = mel_full[:, start:end]
 
         # 对应裁剪 audio
         start_wav = start * self.hop_size
@@ -135,17 +145,18 @@ class NsfBridgeDataset(Dataset):
             audio_seg = np.pad(audio_seg, (0, target_len - len(audio_seg)), mode="constant")
 
         # 裁剪 F0
-        f0_full = self._load_f0_full(rel)
         if f0_full.shape[0] < end:
             pad = end - f0_full.shape[0]
             f0_full = np.pad(f0_full, (0, pad), mode="edge")
         f0_seg = f0_full[start:end]
 
-        return {
+        out: Dict[str, torch.Tensor] = {
             "audio": torch.from_numpy(audio_seg).unsqueeze(0),
-            "mel": mel,
             "f0": torch.from_numpy(f0_seg.astype(np.float32)),
         }
+        if self.compute_mel_in_dataset:
+            out["mel"] = mel
+        return out
 
 
 def create_nsf_bridge_dataloaders(
@@ -163,6 +174,7 @@ def create_nsf_bridge_dataloaders(
     num_frames: int,
     batch_size: int,
     num_workers: int,
+    compute_mel_in_dataset: bool = True,
 ):
     train_dataset = NsfBridgeDataset(
         train_list,
@@ -177,6 +189,7 @@ def create_nsf_bridge_dataloaders(
         num_mels,
         num_frames,
         subset="train",
+        compute_mel_in_dataset=compute_mel_in_dataset,
     )
     val_dataset = NsfBridgeDataset(
         val_list,
@@ -191,6 +204,7 @@ def create_nsf_bridge_dataloaders(
         num_mels,
         num_frames,
         subset="val",
+        compute_mel_in_dataset=compute_mel_in_dataset,
     )
 
     train_loader = DataLoader(
@@ -199,6 +213,7 @@ def create_nsf_bridge_dataloaders(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=bool(num_workers > 0),
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -207,7 +222,7 @@ def create_nsf_bridge_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=bool(num_workers > 0),
         drop_last=False,
     )
     return train_loader, val_loader
-

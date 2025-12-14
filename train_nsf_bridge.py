@@ -66,6 +66,7 @@ def main():
         num_frames=data_cfg["num_frames"],
         batch_size=data_cfg["batch_size"],
         num_workers=data_cfg["num_workers"],
+        compute_mel_in_dataset=data_cfg.get("compute_mel_in_dataset", True),
     )
 
     # 模型：NSF 源 + BCD 作为 Bridge backbone，使用 Score-based BridgeGAN 训练

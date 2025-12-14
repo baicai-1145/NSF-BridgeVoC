@@ -23,6 +23,7 @@ data:
   fmax: 22050.0
   num_mels: 128
   num_frames: 128
+  compute_mel_in_dataset: false
 
 model:
   lr: 0.0002

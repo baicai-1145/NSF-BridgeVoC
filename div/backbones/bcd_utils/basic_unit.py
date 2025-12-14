@@ -525,6 +525,132 @@ class SharedBandSplit_NB48_HighSR(nn.Module):
       return out
 
 
+class SharedBandSplit_Uniform(nn.Module):
+   def __init__(self,
+                freq_bins: int,
+                stride_f: int,
+                input_channel: int = 4,
+                feature_dim: int = 64,
+                use_adanorm: bool = False,
+                causal: bool = True,
+               ):
+      super(SharedBandSplit_Uniform, self).__init__()
+      if freq_bins % stride_f != 0:
+         raise ValueError(f"freq_bins must be divisible by stride_f, got freq_bins={freq_bins}, stride_f={stride_f}")
+
+      self.freq_bins = int(freq_bins)
+      self.stride_f = int(stride_f)
+      self.input_channel = input_channel
+      self.feature_dim = feature_dim
+      self.use_adanorm = use_adanorm
+      self.causal = causal
+      self.eps = torch.finfo(torch.float32).eps
+
+      if self.causal:
+         pad = nn.ConstantPad2d([2, 0, 0, 0], value=0.)
+      else:
+         pad = nn.ConstantPad2d([1, 1, 0, 0], value=0.)
+
+      nband = self.freq_bins // self.stride_f
+      self.reg_encoder = nn.Sequential(
+          pad,
+          nn.Conv2d(in_channels=self.input_channel, out_channels=self.feature_dim, kernel_size=(self.stride_f, 3), stride=(self.stride_f, 1)),
+          BandwiseC2LayerNorm(nband=nband, feature_dim=self.feature_dim)
+      )
+      self.nband = nband
+
+   def get_nband(self):
+      return self.nband
+
+   def forward(self, input=None, time_ada_begin=None):
+      """
+      input: (B, 4, F, T)
+      return: (B, C, nband, T)
+      """
+      batch_size = input.shape[0]
+      if input.shape[-2] != self.freq_bins:
+         raise ValueError(f"Expected F={self.freq_bins}, got F={input.shape[-2]}")
+      out = self.reg_encoder(input)
+      if self.use_adanorm:
+         shift, scale = time_ada_begin.reshape(batch_size, 2, -1).chunk(2, dim=1)
+         shift, scale = shift.squeeze(1), scale.squeeze(1)
+         out = film_modulate(out, shift, scale)
+      return out
+
+
+class SharedBandMerge_Uniform(nn.Module):
+   def __init__(self,
+                nband: int,
+                stride_f: int,
+                feature_dim: int = 64,
+                use_adanorm: bool = False,
+                decode_type: str = 'mag+phase',
+               ):
+      super(SharedBandMerge_Uniform, self).__init__()
+      self.nband = int(nband)
+      self.stride_f = int(stride_f)
+      self.feature_dim = feature_dim
+      self.use_adanorm = use_adanorm
+      self.decode_type = decode_type
+      self.eps = torch.finfo(torch.float32).eps
+
+      self.norm1 = BandwiseC2LayerNorm(nband=self.nband, feature_dim=self.feature_dim)
+      self.norm2 = BandwiseC2LayerNorm(nband=self.nband, feature_dim=self.feature_dim)
+
+      if self.decode_type.lower() == "mag+phase":
+         self.mag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(self.stride_f, 1), stride=(self.stride_f, 1))
+         )
+         self.phase_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=2, kernel_size=(self.stride_f, 1), stride=(self.stride_f, 1))
+         )
+      elif self.decode_type.lower() == "ri":
+         self.real_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(self.stride_f, 1), stride=(self.stride_f, 1))
+         )
+         self.imag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.ConvTranspose2d(in_channels=self.feature_dim * 2, out_channels=1, kernel_size=(self.stride_f, 1), stride=(self.stride_f, 1))
+         )
+      else:
+         raise NotImplementedError("Only Mag+Phase and RI are supported for decoding!")
+
+   def forward(self, emb_input, time_ada_final1=None, time_ada_final2=None):
+      """
+      emb_input: (B, C, nband, T)
+      return:
+         mag: (B, 1, F, T) / phase (B, 2, F, T)  or  real/imag: (B, 1, F, T)
+      """
+      batch_size = emb_input.shape[0]
+      emb_input1, emb_input2 = self.norm1(emb_input), self.norm2(emb_input)
+      if self.use_adanorm:
+         shift1, scale1 = time_ada_final1.reshape(batch_size, 2, -1).chunk(2, dim=1)
+         shift1, scale1 = shift1.squeeze(1), scale1.squeeze(1)
+         emb_input1 = film_modulate(emb_input1, shift1, scale1)
+         shift2, scale2 = time_ada_final2.reshape(batch_size, 2, -1).chunk(2, dim=1)
+         shift2, scale2 = shift2.squeeze(1), scale2.squeeze(1)
+         emb_input2 = film_modulate(emb_input2, shift2, scale2)
+
+      if self.decode_type.lower() == "mag+phase":
+         mag = self.mag_decoder(emb_input1)
+         com = self.phase_decoder(emb_input2)
+         pha = torch.atan2(com[:, -1], com[:, 0])
+         return torch.exp(mag.squeeze(1)), pha
+      elif self.decode_type.lower() == "ri":
+         real = self.real_decoder(emb_input1)
+         imag = self.imag_decoder(emb_input2)
+         return real, imag
+      else:
+         raise NotImplementedError("Only mag+phase and ri are supported, please check it carefully!")
+
+
 class SharedBandMerge_NB48_HighSR(nn.Module):
    def __init__(self,
                 nband: int,

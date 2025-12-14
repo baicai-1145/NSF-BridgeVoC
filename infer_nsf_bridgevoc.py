@@ -165,7 +165,8 @@ def _reverse_to_wav(
 
     sample_complex = torch.complex(sample_ri[:, 0], sample_ri[:, 1])  # (B, F-1, T)
     if model.drop_last_freq:
-        last = sample_complex[:, -1:, :].contiguous()
+        # onesided STFT 的 Nyquist bin：推理时同样用 0 填充，避免复制相邻频带把能量带到 Nyquist 附近。
+        last = torch.zeros_like(sample_complex[:, :1, :]).contiguous()
         sample_complex = torch.cat([sample_complex, last], dim=1)  # (B, F, T)
 
     spec = model._spec_back(sample_complex)

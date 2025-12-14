@@ -96,6 +96,7 @@ class NsfBcdBridge(nn.Module):
         add_noise_std: float = 0.003,
         voiced_threshold: float = 0.0,
         phase_mask_ratio: float = 0.1,
+        mel_phase_gate_ratio: float = 0.0,
         **unused_kwargs: Any,
     ):
         super().__init__()
@@ -119,6 +120,7 @@ class NsfBcdBridge(nn.Module):
         )
         self.voiced_threshold = voiced_threshold
         self.phase_mask_ratio = float(phase_mask_ratio)
+        self.mel_phase_gate_ratio = float(mel_phase_gate_ratio)
 
         # BCD 子带网络作为 STFT 域解码器（结构与 bridge-only 完全一致）
         self.bcd = BCD(
@@ -138,6 +140,7 @@ class NsfBcdBridge(nn.Module):
             use_adanorm=use_adanorm,
             causal=causal,
             sampling_rate=sampling_rate,
+            **unused_kwargs,
         )
 
         # STFT window 用于从 NSF 激励波形提取相位
@@ -216,6 +219,13 @@ class NsfBcdBridge(nn.Module):
         uv = (f0 > self.voiced_threshold).to(mag_src.dtype)  # (B, frames)
         uv = uv[..., :T_common].unsqueeze(1)  # (B, 1, T)
         pha_mask = pha_mask & (uv > 0.5)
+
+        # 进一步用 mag_mel 做门控：避免在幅度很低（谐波间隙/静音）处注入相位。
+        # 这允许把 phase_mask_ratio 调得更小以覆盖高次谐波，同时不把相位“涂”到谷底噪声上。
+        if self.mel_phase_gate_ratio > 0.0:
+            max_mel = mag_mel.amax(dim=-2, keepdim=True).clamp_min(1e-8)  # (B, 1, T)
+            mel_gate = mag_mel > (self.mel_phase_gate_ratio * max_mel)
+            pha_mask = pha_mask & mel_gate
 
         pha_used = torch.where(pha_mask, pha_src, torch.zeros_like(pha_src))
         cond_spec = torch.complex(

@@ -95,6 +95,16 @@ class NsfBridgeScoreModel(pl.LightningModule):
         add_noise_std: float = 0.003,
         voiced_threshold: float = 0.0,
         phase_mask_ratio: float = 0.1,
+        mel_phase_gate_ratio: float = 0.0,
+        # BCD high-SR band mode (forwarded into BCD)
+        highsr_band_mode: str = "legacy",
+        highsr_freq_bins: int = 1024,
+        highsr_coarse_stride_f: int = 16,
+        highsr_refine8_start: int = 256,
+        highsr_refine4_start: int = 672,
+        highsr_refine_overlap: int = 64,
+        highsr_refine8_nblocks: int = 4,
+        highsr_refine4_nblocks: int = 2,
     ):
         super().__init__()
 
@@ -154,6 +164,15 @@ class NsfBridgeScoreModel(pl.LightningModule):
             add_noise_std=add_noise_std,
             voiced_threshold=voiced_threshold,
             phase_mask_ratio=phase_mask_ratio,
+            mel_phase_gate_ratio=mel_phase_gate_ratio,
+            highsr_band_mode=highsr_band_mode,
+            highsr_freq_bins=highsr_freq_bins,
+            highsr_coarse_stride_f=highsr_coarse_stride_f,
+            highsr_refine8_start=highsr_refine8_start,
+            highsr_refine4_start=highsr_refine4_start,
+            highsr_refine_overlap=highsr_refine_overlap,
+            highsr_refine8_nblocks=highsr_refine8_nblocks,
+            highsr_refine4_nblocks=highsr_refine4_nblocks,
         )
 
         # GAN 判别器（与 ScoreModelGAN 相同）
@@ -379,7 +398,10 @@ class NsfBridgeScoreModel(pl.LightningModule):
         """
         score_complex = torch.complex(score[:, 0], score[:, 1])  # (B, F, T) 或 (B, F-1, T)
         if self.drop_last_freq:
-            last_band = score_complex[:, -1:, :].contiguous()
+            # onesided STFT 的 Nyquist bin（最后一带）对实信号应为纯实数且通常能量很小。
+            # 训练时我们不预测该频带（drop_last_freq），因此此处用 0 填充更稳，
+            # 避免复制相邻频带将能量“抬”到 Nyquist 附近，导致 >21.5kHz 噪声。
+            last_band = torch.zeros_like(score_complex[:, :1, :]).contiguous()
             score_complex = torch.cat([score_complex, last_band], dim=1)  # (B, F, T)
         score_complex = self._spec_back(score_complex)
         window = torch.hann_window(self.win_size, device=score_complex.device)

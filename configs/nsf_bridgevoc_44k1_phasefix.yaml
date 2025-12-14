@@ -1,0 +1,87 @@
+trainer:
+  max_epochs: 1000
+  accelerator: gpu
+  devices: 1
+  accumulate_grad_batches: 1
+  # 权重保存步数
+  ckpt_every_n_steps: 10000
+  # 验证间隔步数（与保存步数解耦）
+  val_check_interval: 20000
+
+data:
+  raw_wavfile_path: ./data/train/audio
+  train_data_dir: ./data/train/train.txt
+  val_data_dir: ./data/train/val.txt
+  f0_root: ./data/f0
+  batch_size: 10
+  num_workers: 4
+  sampling_rate: 44100
+  n_fft: 2048
+  hop_size: 512
+  win_size: 2048
+  fmin: 0.0
+  fmax: 22050.0
+  num_mels: 128
+  num_frames: 128
+
+model:
+  # ScoreModelGAN / 优化相关参数
+  lr: 0.0002
+  beta1: 0.8
+  beta2: 0.99
+  opt_type: AdamW
+  ema_decay: 0.999
+  t_eps: 0.03
+  num_eval_files: 20
+  use_gan: true
+  loss_type_list: "score_mse:1.0,multi-mel:0.1,multi-stft:0.05"
+
+  # 频谱压缩参数（与 default_bridgevoc_44k1.yaml 中 DataModule 段保持一致）
+  spec_factor: 0.33
+  spec_abs_exponent: 0.5
+  transform_type: exponent
+  drop_last_freq: true
+
+  # BridgeGAN SDE 参数（与 default_bridgevoc_44k1.yaml 中 SDE 段保持一致）
+  beta_min: 0.01
+  beta_max: 20.0
+  c: 0.4
+  k: 2.6
+  bridge_type: gmax
+  N: 4
+  offset: 1.0e-5
+  predictor: x0
+  sampling_type: sde_first_order
+
+  # BCD 结构参数（与 default_bridgevoc_44k1.yaml 中 BackboneScore 保持一致）
+  nblocks: 8
+  hidden_channel: 256
+  f_kernel_size: 9
+  t_kernel_size: 11
+  mlp_ratio: 1
+  ada_rank: 32
+  ada_alpha: 32
+  ada_mode: sola
+  act_type: gelu
+  pe_type: positional
+  scale: 1000
+  decode_type: ri
+  use_adanorm: true
+  causal: false
+
+  loss_fft_sizes: [512, 1024, 2048]
+  loss_hop_sizes: [128, 256, 512]
+  loss_win_lengths: [512, 1024, 2048]
+  aux_mel_weight: 45.0
+  aux_stft_weight: 2.5
+
+  # NSF 源参数（phase 条件谱构造用）
+  harmonic_num: 8
+  sine_amp: 0.1
+  # 你的 build_cond() 会拿 har_source 的 STFT 相位当条件；这里的噪声会抬高阈值并污染相位，先关掉更稳。
+  add_noise_std: 0.0
+  voiced_threshold: 0.0
+  # 原始 0.1 在 44.1k 下过于保守（高次谐波很弱，几乎不注入相位）；放宽到 0.01 以覆盖更多高次谐波。
+  phase_mask_ratio: 0.01
+  # 进一步用 mag_mel 做门控：允许 phase_mask_ratio 更小而不把相位注入到谐波间隙/静音谷底。
+  mel_phase_gate_ratio: 0.01

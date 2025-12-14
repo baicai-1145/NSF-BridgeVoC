@@ -1,0 +1,89 @@
+trainer:
+  max_epochs: 1000
+  accelerator: gpu
+  devices: 1
+  accumulate_grad_batches: 1
+  log_dir: ckpt/nsf_bridgevoc_44k1_ab
+  run_name: ms_16_8_4
+  ckpt_every_n_steps: 10000
+  val_check_interval: 20000
+
+data:
+  raw_wavfile_path: ./data/train/audio
+  train_data_dir: ./data/train/train.txt
+  val_data_dir: ./data/train/val.txt
+  f0_root: ./data/f0
+  batch_size: 1
+  num_workers: 0
+  sampling_rate: 44100
+  n_fft: 2048
+  hop_size: 512
+  win_size: 2048
+  fmin: 0.0
+  fmax: 22050.0
+  num_mels: 128
+  num_frames: 128
+
+model:
+  lr: 0.0002
+  beta1: 0.8
+  beta2: 0.99
+  opt_type: AdamW
+  ema_decay: 0.999
+  t_eps: 0.03
+  num_eval_files: 20
+  use_gan: true
+  loss_type_list: "score_mse:1.0,multi-mel:0.12,multi-stft:0.07"
+
+  spec_factor: 0.33
+  spec_abs_exponent: 0.5
+  transform_type: exponent
+  drop_last_freq: true
+
+  beta_min: 0.01
+  beta_max: 20.0
+  c: 0.4
+  k: 2.6
+  bridge_type: gmax
+  N: 4
+  offset: 1.0e-5
+  predictor: x0
+  sampling_type: sde_first_order
+
+  nblocks: 6
+  hidden_channel: 160
+  f_kernel_size: 9
+  t_kernel_size: 11
+  mlp_ratio: 1
+  ada_rank: 16
+  ada_alpha: 16
+  ada_mode: sola
+  act_type: gelu
+  pe_type: positional
+  scale: 1000
+  decode_type: ri
+  use_adanorm: true
+  causal: false
+
+  # High-SR multi-stage refine mode (16 -> 8 -> 4, only overlap recompute)
+  highsr_band_mode: ms_16_8_4
+  highsr_freq_bins: 1024
+  highsr_coarse_stride_f: 16
+  highsr_refine8_start: 256
+  highsr_refine4_start: 672
+  highsr_refine_overlap: 64
+  highsr_refine8_nblocks: 4
+  highsr_refine4_nblocks: 2
+
+  loss_fft_sizes: [512, 1024, 2048]
+  loss_hop_sizes: [128, 256, 512]
+  loss_win_lengths: [512, 1024, 2048]
+  aux_mel_weight: 45.0
+  aux_stft_weight: 2.5
+
+  harmonic_num: 8
+  sine_amp: 0.1
+  add_noise_std: 0.0
+  voiced_threshold: 0.0
+  phase_mask_ratio: 0.01
+  mel_phase_gate_ratio: 0.01

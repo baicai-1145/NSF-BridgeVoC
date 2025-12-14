@@ -42,6 +42,23 @@ class BCD(nn.Module):
                           help="Whether to use AdaNorm strategy.")
       parser.add_argument("--causal", action="store_true",
                           help="Whether to use causal network setups.")
+      parser.add_argument("--highsr_band_mode", type=str, required=False, default="legacy",
+                          choices=["legacy", "full_uniform", "ms_16_8_4"],
+                          help="High-SR band split/merge mode. legacy=12/24/44 hard split; full_uniform=full-band uniform stride; ms_16_8_4=full_uniform + refine branches.")
+      parser.add_argument("--highsr_freq_bins", type=int, required=False, default=1024,
+                          help="Expected F bins after drop_last_freq for high SR (e.g. 1024 for n_fft=2048).")
+      parser.add_argument("--highsr_coarse_stride_f", type=int, required=False, default=16,
+                          help="Uniform stride_f for high-SR coarse branch (full_uniform/ms_16_8_4).")
+      parser.add_argument("--highsr_refine8_start", type=int, required=False, default=256,
+                          help="Refine-8 start bin (ms_16_8_4).")
+      parser.add_argument("--highsr_refine4_start", type=int, required=False, default=672,
+                          help="Refine-4 start bin (ms_16_8_4).")
+      parser.add_argument("--highsr_refine_overlap", type=int, required=False, default=64,
+                          help="Overlap width in bins for ramp fusion (ms_16_8_4).")
+      parser.add_argument("--highsr_refine8_nblocks", type=int, required=False, default=4,
+                          help="Refine-8 Conv2Former blocks (ms_16_8_4).")
+      parser.add_argument("--highsr_refine4_nblocks", type=int, required=False, default=2,
+                          help="Refine-4 Conv2Former blocks (ms_16_8_4).")
       return parser
 
    def __init__(self, 
@@ -61,6 +78,14 @@ class BCD(nn.Module):
                 use_adanorm: bool = True,
                 causal: bool = False,
                 sampling_rate: int = 24000,
+                highsr_band_mode: str = "legacy",
+                highsr_freq_bins: int = 1024,
+                highsr_coarse_stride_f: int = 16,
+                highsr_refine8_start: int = 256,
+                highsr_refine4_start: int = 672,
+                highsr_refine_overlap: int = 64,
+                highsr_refine8_nblocks: int = 4,
+                highsr_refine4_nblocks: int = 2,
                 **unused_kwargs,
                 ):
       super(BCD, self).__init__()
@@ -80,30 +105,154 @@ class BCD(nn.Module):
       self.use_adanorm = use_adanorm
       self.causal = causal
       self.sampling_rate = sampling_rate
+      self.highsr_band_mode = str(highsr_band_mode).lower()
+      self.highsr_freq_bins = int(highsr_freq_bins)
+      self.highsr_coarse_stride_f = int(highsr_coarse_stride_f)
+      self.highsr_refine8_start = int(highsr_refine8_start)
+      self.highsr_refine4_start = int(highsr_refine4_start)
+      self.highsr_refine_overlap = int(highsr_refine_overlap)
+      self.highsr_refine8_nblocks = int(highsr_refine8_nblocks)
+      self.highsr_refine4_nblocks = int(highsr_refine4_nblocks)
 
       if self.sampling_rate > 24000:
-         self.enc = SharedBandSplit_NB48_HighSR(input_channel=self.input_channel,
-                                                feature_dim=self.hidden_channel,
-                                                use_adanorm=self.use_adanorm,
-                                                causal=self.causal,
-                                                )
+         if self.highsr_band_mode == "legacy":
+            self.enc = SharedBandSplit_NB48_HighSR(input_channel=self.input_channel,
+                                                   feature_dim=self.hidden_channel,
+                                                   use_adanorm=self.use_adanorm,
+                                                   causal=self.causal,
+                                                   )
+            self.nband = self.enc.get_nband()
+            self.dec = SharedBandMerge_NB48_HighSR(nband=self.nband,
+                                                   feature_dim=self.hidden_channel,
+                                                   use_adanorm=self.use_adanorm,
+                                                   decode_type=self.decode_type)
+            self.use_refine = False
+         elif self.highsr_band_mode in ["full_uniform", "ms_16_8_4"]:
+            if self.highsr_freq_bins % self.highsr_coarse_stride_f != 0:
+               raise ValueError(f"highsr_freq_bins must be divisible by highsr_coarse_stride_f, got {self.highsr_freq_bins} / {self.highsr_coarse_stride_f}")
+            self.enc = SharedBandSplit_Uniform(freq_bins=self.highsr_freq_bins,
+                                               stride_f=self.highsr_coarse_stride_f,
+                                               input_channel=self.input_channel,
+                                               feature_dim=self.hidden_channel,
+                                               use_adanorm=self.use_adanorm,
+                                               causal=self.causal)
+            self.nband = self.enc.get_nband()
+            self.dec = SharedBandMerge_Uniform(nband=self.nband,
+                                               stride_f=self.highsr_coarse_stride_f,
+                                               feature_dim=self.hidden_channel,
+                                               use_adanorm=self.use_adanorm,
+                                               decode_type=self.decode_type)
+            self.use_refine = self.highsr_band_mode == "ms_16_8_4"
+         else:
+            raise ValueError(f"Unknown highsr_band_mode: {self.highsr_band_mode}")
       else:
          self.enc = SharedBandSplit_NB24_24k(input_channel=self.input_channel,
                                              feature_dim=self.hidden_channel,
                                              use_adanorm=self.use_adanorm,
                                              causal=self.causal,
                                              )
-      self.nband = self.enc.get_nband()
-      if self.sampling_rate > 24000:
-         self.dec = SharedBandMerge_NB48_HighSR(nband=self.nband,
-                                                feature_dim=self.hidden_channel,
-                                                use_adanorm=self.use_adanorm,
-                                                decode_type=self.decode_type)
-      else:
+         self.nband = self.enc.get_nband()
          self.dec = SharedBandMerge_NB24_24k(nband=self.nband,
                                              feature_dim=self.hidden_channel,
                                              use_adanorm=self.use_adanorm,
                                              decode_type=self.decode_type)
+         self.use_refine = False
+
+      if self.use_refine:
+         if self.decode_type.lower() != "ri":
+            raise NotImplementedError("ms_16_8_4 currently supports decode_type=ri only.")
+
+         if self.highsr_refine_overlap <= 0:
+            raise ValueError("highsr_refine_overlap must be > 0 for ms_16_8_4.")
+
+         refine8_stride_f = 8
+         refine4_stride_f = 4
+         refine8_end = self.highsr_refine4_start + self.highsr_refine_overlap
+         refine4_end = self.highsr_freq_bins
+         refine8_len = refine8_end - self.highsr_refine8_start
+         refine4_len = refine4_end - self.highsr_refine4_start
+         overlap_len = refine8_end - self.highsr_refine4_start
+
+         if refine8_len <= 0 or refine4_len <= 0:
+            raise ValueError("Invalid refine slice bins: check refine8_start/refine4_start/freq_bins/overlap.")
+         if refine8_len % refine8_stride_f != 0:
+            raise ValueError(f"Refine-8 slice length must be divisible by {refine8_stride_f}, got {refine8_len}")
+         if refine4_len % refine4_stride_f != 0:
+            raise ValueError(f"Refine-4 slice length must be divisible by {refine4_stride_f}, got {refine4_len}")
+         if overlap_len != self.highsr_refine_overlap:
+            raise ValueError("Expected refine8_end == refine4_start + overlap.")
+         if overlap_len > refine8_len or overlap_len > refine4_len:
+            raise ValueError("Overlap must be <= each refine slice length.")
+
+         self.refine8_start = self.highsr_refine8_start
+         self.refine8_end = refine8_end
+         self.refine4_start = self.highsr_refine4_start
+         self.refine4_end = refine4_end
+
+         self.refine8_enc = SharedBandSplit_Uniform(freq_bins=refine8_len,
+                                                    stride_f=refine8_stride_f,
+                                                    input_channel=self.input_channel,
+                                                    feature_dim=self.hidden_channel,
+                                                    use_adanorm=self.use_adanorm,
+                                                    causal=self.causal)
+         self.refine8_dec = SharedBandMerge_Uniform(nband=self.refine8_enc.get_nband(),
+                                                    stride_f=refine8_stride_f,
+                                                    feature_dim=self.hidden_channel,
+                                                    use_adanorm=self.use_adanorm,
+                                                    decode_type=self.decode_type)
+         self.refine8_net = Conv2FormerNet(nband=self.refine8_enc.get_nband(),
+                                           nblocks=self.highsr_refine8_nblocks,
+                                           input_channel=self.hidden_channel,
+                                           hidden_channel=self.hidden_channel,
+                                           f_kernel_size=self.f_kernel_size,
+                                           t_kernel_size=self.t_kernel_size,
+                                           mlp_ratio=self.mlp_ratio,
+                                           ada_rank=self.ada_rank,
+                                           ada_alpha=self.ada_alpha,
+                                           ada_mode=self.ada_mode,
+                                           act_type=self.act_type,
+                                           causal=self.causal,
+                                           use_adanorm=self.use_adanorm)
+
+         self.refine4_enc = SharedBandSplit_Uniform(freq_bins=refine4_len,
+                                                    stride_f=refine4_stride_f,
+                                                    input_channel=self.input_channel,
+                                                    feature_dim=self.hidden_channel,
+                                                    use_adanorm=self.use_adanorm,
+                                                    causal=self.causal)
+         self.refine4_dec = SharedBandMerge_Uniform(nband=self.refine4_enc.get_nband(),
+                                                    stride_f=refine4_stride_f,
+                                                    feature_dim=self.hidden_channel,
+                                                    use_adanorm=self.use_adanorm,
+                                                    decode_type=self.decode_type)
+         self.refine4_net = Conv2FormerNet(nband=self.refine4_enc.get_nband(),
+                                           nblocks=self.highsr_refine4_nblocks,
+                                           input_channel=self.hidden_channel,
+                                           hidden_channel=self.hidden_channel,
+                                           f_kernel_size=self.f_kernel_size,
+                                           t_kernel_size=self.t_kernel_size,
+                                           mlp_ratio=self.mlp_ratio,
+                                           ada_rank=self.ada_rank,
+                                           ada_alpha=self.ada_alpha,
+                                           ada_mode=self.ada_mode,
+                                           act_type=self.act_type,
+                                           causal=self.causal,
+                                           use_adanorm=self.use_adanorm)
+
+         self.alpha8 = nn.Parameter(torch.ones([1, self.hidden_channel, self.refine8_enc.get_nband(), 1]))
+         self.alpha4 = nn.Parameter(torch.ones([1, self.hidden_channel, self.refine4_enc.get_nband(), 1]))
+         with torch.no_grad():
+            self.alpha8.mul_(1e-4)
+            self.alpha4.mul_(1e-4)
+
+         ramp = torch.linspace(0.0, 1.0, overlap_len, dtype=torch.float32)
+         w8 = torch.ones([refine8_len], dtype=torch.float32)
+         w8[:overlap_len] = ramp
+         w8[-overlap_len:] = 1.0 - ramp
+         w4 = torch.ones([refine4_len], dtype=torch.float32)
+         w4[:overlap_len] = ramp
+         self.register_buffer("refine8_weight", w8.reshape(1, 1, -1, 1), persistent=False)
+         self.register_buffer("refine4_weight", w4.reshape(1, 1, -1, 1), persistent=False)
 
       self.main_net = Conv2FormerNet(nband=self.nband,
                                     nblocks=self.nblocks,
@@ -171,6 +320,13 @@ class BCD(nn.Module):
          for block in self.main_net.net:
             nn.init.kaiming_uniform_(block.ada.lora_a.weight, a=math.sqrt(5))
             nn.init.constant_(block.ada.lora_b.weight, 0) 
+         if getattr(self, "use_refine", False):
+            for block in self.refine8_net.net:
+               nn.init.kaiming_uniform_(block.ada.lora_a.weight, a=math.sqrt(5))
+               nn.init.constant_(block.ada.lora_b.weight, 0)
+            for block in self.refine4_net.net:
+               nn.init.kaiming_uniform_(block.ada.lora_a.weight, a=math.sqrt(5))
+               nn.init.constant_(block.ada.lora_b.weight, 0)
 
    def forward(self, inpt, cond=None, time_cond=None):
       """
@@ -210,4 +366,27 @@ class BCD(nn.Module):
          out = torch.cat([out_real, out_imag], dim=1)
       else:
          raise NotImplementedError("Only mag+phase and ri are supported, please check it carefully!")
+
+      if getattr(self, "use_refine", False):
+         if inpt_spec.shape[-2] != self.highsr_freq_bins:
+            raise ValueError(f"Expected F={self.highsr_freq_bins} for ms_16_8_4, got F={inpt_spec.shape[-2]}")
+
+         x8_in = inpt_spec[..., self.refine8_start:self.refine8_end, :]
+         enc8 = self.refine8_enc(x8_in, time_ada_begin=time_ada_begin)
+         x8 = self.refine8_net(enc8, time_token=time_token, time_ada=time_ada)
+         x8 = x8 + self.alpha8 * enc8
+         d8_r, d8_i = self.refine8_dec(x8, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
+
+         out[:, 0:1, self.refine8_start:self.refine8_end, :] = out[:, 0:1, self.refine8_start:self.refine8_end, :] + self.refine8_weight * d8_r
+         out[:, 1:2, self.refine8_start:self.refine8_end, :] = out[:, 1:2, self.refine8_start:self.refine8_end, :] + self.refine8_weight * d8_i
+
+         x4_in = inpt_spec[..., self.refine4_start:self.refine4_end, :]
+         enc4 = self.refine4_enc(x4_in, time_ada_begin=time_ada_begin)
+         x4 = self.refine4_net(enc4, time_token=time_token, time_ada=time_ada)
+         x4 = x4 + self.alpha4 * enc4
+         d4_r, d4_i = self.refine4_dec(x4, time_ada_final1=time_ada_final1, time_ada_final2=time_ada_final2)
+
+         out[:, 0:1, self.refine4_start:self.refine4_end, :] = out[:, 0:1, self.refine4_start:self.refine4_end, :] + self.refine4_weight * d4_r
+         out[:, 1:2, self.refine4_start:self.refine4_end, :] = out[:, 1:2, self.refine4_start:self.refine4_end, :] + self.refine4_weight * d4_i
+
       return out

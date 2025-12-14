@@ -126,20 +126,32 @@ def main():
         add_noise_std=model_cfg.get("add_noise_std", 0.003),
         voiced_threshold=model_cfg.get("voiced_threshold", 0.0),
         phase_mask_ratio=model_cfg.get("phase_mask_ratio", 0.1),
+        mel_phase_gate_ratio=model_cfg.get("mel_phase_gate_ratio", 0.0),
+        # High-SR band mode (forwarded into BCD via NsfBcdBridge)
+        highsr_band_mode=model_cfg.get("highsr_band_mode", "legacy"),
+        highsr_freq_bins=model_cfg.get("highsr_freq_bins", 1024),
+        highsr_coarse_stride_f=model_cfg.get("highsr_coarse_stride_f", 16),
+        highsr_refine8_start=model_cfg.get("highsr_refine8_start", 256),
+        highsr_refine4_start=model_cfg.get("highsr_refine4_start", 672),
+        highsr_refine_overlap=model_cfg.get("highsr_refine_overlap", 64),
+        highsr_refine8_nblocks=model_cfg.get("highsr_refine8_nblocks", 4),
+        highsr_refine4_nblocks=model_cfg.get("highsr_refine4_nblocks", 2),
     )
 
-    # 日志与检查点
-    log_dir = os.path.join("ckpt", "nsf_bridgevoc_44k1")
+    # 日志与检查点（支持在 YAML 的 trainer 段自定义，便于做 A/B 对比）
+    base_log_dir = trainer_cfg.get("log_dir", os.path.join("ckpt", "nsf_bridgevoc_44k1"))
+    run_name = trainer_cfg.get("run_name", "nsf_bridgevoc")
     logger = TensorBoardLogger(
-        save_dir=log_dir,
-        name="nsf_bridgevoc",
+        save_dir=base_log_dir,
+        name=run_name,
     )
+    exp_dir = os.path.join(base_log_dir, run_name)
 
     ckpt_every_n_steps = trainer_cfg.get("ckpt_every_n_steps", 10000)
     val_check_interval = trainer_cfg.get("val_check_interval", 20000)
 
     checkpoint_cb = ModelCheckpoint(
-        dirpath=os.path.join(log_dir, "checkpoints"),
+        dirpath=os.path.join(exp_dir, "checkpoints"),
         filename="step={step}",
         save_top_k=-1,
         every_n_train_steps=ckpt_every_n_steps,

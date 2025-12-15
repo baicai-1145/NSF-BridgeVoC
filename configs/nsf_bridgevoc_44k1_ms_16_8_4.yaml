@@ -1,19 +1,21 @@
 trainer:
   max_epochs: 1000
+  # 建议设置 max_steps 以避免单 epoch 过长，并为按 step 的 lr schedule 提供总步数
+  max_steps: -1
   accelerator: gpu
   devices: 1
   accumulate_grad_batches: 1
   log_dir: ckpt/nsf_bridgevoc_44k1_ab
   run_name: ms_16_8_4
-  ckpt_every_n_steps: 10000
-  val_check_interval: 20000
+  ckpt_every_n_steps: 5000
+  val_check_interval: 1000
 
 data:
   raw_wavfile_path: ./data/train/audio
   train_data_dir: ./data/train/train.txt
   val_data_dir: ./data/train/val.txt
   f0_root: ./data/f0
-  batch_size: 1
+  batch_size: 8
   num_workers: 0
   sampling_rate: 44100
   n_fft: 2048
@@ -26,7 +28,11 @@ data:
   compute_mel_in_dataset: false
 
 model:
-  lr: 0.0002
+  lr: 0.00002
+  lr_scheduler_interval: step
+  lr_eta_min: 1.0e-6
+  # 建议同时设置 trainer.max_steps 或这里的 lr_tmax_steps，以便按 step 平滑衰减
+  lr_tmax_steps: 0
   beta1: 0.8
   beta2: 0.99
   opt_type: AdamW
@@ -46,18 +52,18 @@ model:
   c: 0.4
   k: 2.6
   bridge_type: gmax
-  N: 4
+  N: 8
   offset: 1.0e-5
   predictor: x0
   sampling_type: sde_first_order
 
-  nblocks: 6
-  hidden_channel: 160
+  nblocks: 4
+  hidden_channel: 128
   f_kernel_size: 9
   t_kernel_size: 11
   mlp_ratio: 1
-  ada_rank: 16
-  ada_alpha: 16
+  ada_rank: 8
+  ada_alpha: 8
   ada_mode: sola
   act_type: gelu
   pe_type: positional
@@ -73,8 +79,8 @@ model:
   highsr_refine8_start: 256
   highsr_refine4_start: 672
   highsr_refine_overlap: 64
-  highsr_refine8_nblocks: 4
-  highsr_refine4_nblocks: 2
+  highsr_refine8_nblocks: 6
+  highsr_refine4_nblocks: 4
 
   loss_fft_sizes: [512, 1024, 2048]
   loss_hop_sizes: [128, 256, 512]
@@ -82,7 +88,7 @@ model:
   aux_mel_weight: 45.0
   aux_stft_weight: 2.5
 
-  harmonic_num: 8
+  harmonic_num: 16
   sine_amp: 0.1
   add_noise_std: 0.0
   voiced_threshold: 0.0

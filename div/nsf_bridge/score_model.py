@@ -65,6 +65,9 @@ class NsfBridgeScoreModel(pl.LightningModule):
         use_gan: bool = True,
         num_eval_files: int = 20,
         max_epochs: int = 1000,
+        lr_scheduler_interval: str = "epoch",
+        lr_eta_min: float = 1e-5,
+        lr_tmax_steps: int = 0,
         # BridgeGAN SDE 参数（与 default_bridgevoc_44k1.yaml 对齐）
         beta_min: float = 0.01,
         beta_max: float = 20.0,
@@ -201,6 +204,9 @@ class NsfBridgeScoreModel(pl.LightningModule):
         self.beta1 = beta1
         self.beta2 = beta2
         self.max_epochs = max_epochs
+        self.lr_scheduler_interval = str(lr_scheduler_interval).lower()
+        self.lr_eta_min = float(lr_eta_min)
+        self.lr_tmax_steps = int(lr_tmax_steps)
         self.num_eval_files = num_eval_files
 
         if self.use_gan:
@@ -266,11 +272,30 @@ class NsfBridgeScoreModel(pl.LightningModule):
             optimizer = torch.optim.AdamW(
                 self.dnn.parameters(), lr=self.lr, betas=(self.beta1, self.beta2)
             )
-        scheduler = CosineAnnealingLR(optimizer, T_max=self.max_epochs, eta_min=1e-5)
-        return {"optimizer": optimizer, "lr_scheduler": scheduler}
+        if self.lr_scheduler_interval == "step":
+            if self.lr_tmax_steps > 0:
+                t_max = self.lr_tmax_steps
+            elif getattr(self, "trainer", None) is not None and getattr(self.trainer, "max_steps", None) not in [None, -1, 0]:
+                t_max = int(self.trainer.max_steps)
+            elif getattr(self, "trainer", None) is not None and getattr(self.trainer, "estimated_stepping_batches", None) is not None:
+                t_max = int(self.trainer.estimated_stepping_batches)
+            else:
+                t_max = int(self.max_epochs) * 1000
+                warnings.warn(
+                    f"lr_scheduler_interval=step but total steps is unknown; fallback T_max={t_max}. "
+                    f"Consider setting trainer.max_steps or model.lr_tmax_steps."
+                )
+            scheduler = CosineAnnealingLR(optimizer, T_max=t_max, eta_min=self.lr_eta_min)
+            scheduler_cfg = {"scheduler": scheduler, "interval": "step", "frequency": 1}
+        else:
+            scheduler = CosineAnnealingLR(optimizer, T_max=self.max_epochs, eta_min=self.lr_eta_min)
+            scheduler_cfg = {"scheduler": scheduler, "interval": "epoch", "frequency": 1}
+        return {"optimizer": optimizer, "lr_scheduler": scheduler_cfg}
 
     def lr_scheduler_step(self, scheduler, metric=None):
         scheduler.step()
+
+    def on_train_epoch_end(self) -> None:
         if self.use_gan:
             self.scheduler_d.step()
 

@@ -3,7 +3,7 @@ import os
 import sys
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
 
 # 确保无论从哪个工作目录运行，本工程根目录都在 sys.path 中，
@@ -106,6 +106,9 @@ def main():
         use_gan=model_cfg.get("use_gan", True),
         num_eval_files=model_cfg.get("num_eval_files", 20),
         max_epochs=trainer_cfg.get("max_epochs", 1000),
+        lr_scheduler_interval=model_cfg.get("lr_scheduler_interval", "epoch"),
+        lr_eta_min=model_cfg.get("lr_eta_min", 1e-5),
+        lr_tmax_steps=model_cfg.get("lr_tmax_steps", 0),
         # SDE / BridgeGAN 参数（如未提供，沿用 default_bridgevoc_44k1.yaml 中设置）
         beta_min=model_cfg.get("beta_min", 0.01),
         beta_max=model_cfg.get("beta_max", 20.0),
@@ -188,14 +191,16 @@ def main():
         every_n_train_steps=ckpt_every_n_steps,
         save_on_train_epoch_end=False,
     )
+    lr_monitor_cb = LearningRateMonitor(logging_interval="step")
 
     trainer = pl.Trainer(
         max_epochs=trainer_cfg.get("max_epochs", 1000),
+        max_steps=trainer_cfg.get("max_steps", -1),
         accelerator=trainer_cfg.get("accelerator", "gpu"),
         devices=trainer_cfg.get("devices", 1),
         accumulate_grad_batches=trainer_cfg.get("accumulate_grad_batches", 1),
         logger=logger,
-        callbacks=[checkpoint_cb, TQDMProgressBar(refresh_rate=100)],
+        callbacks=[checkpoint_cb, lr_monitor_cb, TQDMProgressBar(refresh_rate=100)],
         val_check_interval=val_check_interval,
     )
 

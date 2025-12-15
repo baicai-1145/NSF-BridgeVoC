@@ -1,5 +1,5 @@
 trainer:
-  max_epochs: 1000
+  max_epochs: 50
   # 建议设置 max_steps 以避免单 epoch 过长，并为按 step 的 lr schedule 提供总步数
   max_steps: -1
   accelerator: gpu
@@ -16,7 +16,7 @@ data:
   val_data_dir: ./data/train/val.txt
   f0_root: ./data/f0
   batch_size: 8
-  num_workers: 0
+  num_workers: 24
   sampling_rate: 44100
   n_fft: 2048
   hop_size: 512
@@ -57,13 +57,13 @@ model:
   predictor: x0
   sampling_type: sde_first_order
 
-  nblocks: 4
-  hidden_channel: 128
+  nblocks: 6
+  hidden_channel: 160
   f_kernel_size: 9
   t_kernel_size: 11
   mlp_ratio: 1
-  ada_rank: 8
-  ada_alpha: 8
+  ada_rank: 16
+  ada_alpha: 16
   ada_mode: sola
   act_type: gelu
   pe_type: positional

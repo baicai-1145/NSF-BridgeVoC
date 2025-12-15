@@ -33,7 +33,17 @@ def _parse_args():
         "--ckpt_path",
         type=str,
         default=None,
-        help="可选：从已有 checkpoint 恢复/微调的路径，例如 ckpt/nsf_bridgevoc_44k1/checkpoints/step=step=230000.ckpt",
+        help="可选：checkpoint 路径。",
+    )
+    parser.add_argument(
+        "--weights_only",
+        action="store_true",
+        help="仅加载模型权重，不恢复优化器/调度器状态；用于 finetune 或修改学习率。",
+    )
+    parser.add_argument(
+        "--strict_load",
+        action="store_true",
+        help="加载权重时使用 strict=True（默认 strict=False，会自动忽略缺失 key 与 shape 不匹配）。",
     )
     return parser.parse_args()
 
@@ -139,6 +149,26 @@ def main():
         highsr_refine4_nblocks=model_cfg.get("highsr_refine4_nblocks", 2),
     )
 
+    # 可选：仅加载权重（不恢复 optim/scheduler），并支持自动忽略 shape mismatch
+    if args.ckpt_path and args.weights_only:
+        import torch
+
+        ckpt = torch.load(args.ckpt_path, map_location="cpu")
+        state_dict = ckpt.get("state_dict", ckpt)
+        model_state = model.state_dict()
+        filtered = {}
+        skipped = 0
+        for k, v in state_dict.items():
+            if k in model_state and hasattr(v, "shape") and model_state[k].shape == v.shape:
+                filtered[k] = v
+            else:
+                skipped += 1
+        missing, unexpected = model.load_state_dict(filtered, strict=args.strict_load)
+        print(f"[INFO] weights_only load: loaded={len(filtered)}, skipped={skipped}, missing={len(missing)}, unexpected={len(unexpected)}")
+        ckpt_path_for_trainer = None
+    else:
+        ckpt_path_for_trainer = args.ckpt_path
+
     # 日志与检查点（支持在 YAML 的 trainer 段自定义，便于做 A/B 对比）
     base_log_dir = trainer_cfg.get("log_dir", os.path.join("ckpt", "nsf_bridgevoc_44k1"))
     run_name = trainer_cfg.get("run_name", "nsf_bridgevoc")
@@ -169,7 +199,7 @@ def main():
         val_check_interval=val_check_interval,
     )
 
-    trainer.fit(model, train_loader, val_loader, ckpt_path=args.ckpt_path)
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path_for_trainer)
 
 
 if __name__ == "__main__":

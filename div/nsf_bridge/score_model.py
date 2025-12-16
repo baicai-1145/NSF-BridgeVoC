@@ -511,7 +511,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
             # 判别器更新（与 ScoreModelGAN 一致，每隔一步）
             if batch_idx % 2 == 0 and self.use_gan:
                 t = torch.rand(x.shape[0], dtype=x.dtype, device=x.device, requires_grad=False)
-                t = torch.clamp(t, self.sde.offset, 1.0 - self.sde.offset)
+                t = torch.clamp(t, self.t_eps, 1.0 - self.t_eps)
                 xt, target = self.sde.forward_diffusion(x0=x, x1=y, t=t)
                 score = self(xt, t, y)  # generator 输出
                 # 将 score 还原为波形，用于判别器（与 bridge-only 相同的谱压缩/反变换流程）
@@ -528,7 +528,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
 
             # 生成器 / score 网络更新
             t = torch.rand(x.shape[0], dtype=x.dtype, device=x.device, requires_grad=False)
-            t = torch.clamp(t, self.sde.offset, 1.0 - self.sde.offset)
+            t = torch.clamp(t, self.t_eps, 1.0 - self.t_eps)
             xt, target = self.sde.forward_diffusion(x0=x, x1=y, t=t)
             score = self(xt, t, y)
 
@@ -627,7 +627,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
 
                     # BridgeGAN 扩散 + score 预测（同训练）
                     t = torch.rand(x_ri.shape[0], dtype=x_ri.dtype, device=x_ri.device, requires_grad=False)
-                    t = torch.clamp(t, self.sde.offset, 1.0 - self.sde.offset)
+                    t = torch.clamp(t, self.t_eps, 1.0 - self.t_eps)
                     xt, target = self.sde.forward_diffusion(x0=x_ri, x1=cond_full, t=t)
                     score = self(xt, t, cond_full)
 

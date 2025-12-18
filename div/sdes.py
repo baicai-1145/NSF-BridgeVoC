@@ -320,6 +320,9 @@ class BridgeGAN(SDE, nn.Module):
         self.sampling_type = sampling_type
 
         self.alpha_1 = 1
+        # Sampling noise scale for sde_first_order; set to 0.0 for deterministic (DDIM-like) sampling.
+        # Kept as an attribute so inference scripts can override without changing signatures.
+        self.noise_scale = 1.0
 
     def get_alpha(self, t):
         """
@@ -450,7 +453,7 @@ class BridgeGAN(SDE, nn.Module):
         return hat_x0
 
     @torch.no_grad()
-    def reverse_diffusion(self, x1, cond, dnn, to_cpu=True):
+    def reverse_diffusion(self, x1, cond, dnn, to_cpu=True, return_traj: bool = False):
         """
         x1: (B, 2, F, T)
         cond: score_conditioning
@@ -458,15 +461,16 @@ class BridgeGAN(SDE, nn.Module):
         """
         h = 1.0 / self.N
         xt = x1
-        if to_cpu:
-            xt_traj = [xt.detach().cpu()]
-        else:
-            xt_traj = [xt.detach()]
+        xt_traj = None
+        if return_traj:
+            xt_traj = [xt.detach().cpu() if to_cpu else xt.detach()]
         for i in range(self.N):
             if self.sampling_type.lower() == "sde_first_order":
                 # s -> t
                 s = (1.0 - self.offset - (i * h)) * torch.ones(xt.shape[0], dtype=xt.dtype, device=xt.device)
-                t = max(self.offset, 1.0 - self.offset - (i+1)*h) * torch.ones(xt.shape[0], dtype=xt.dtype, device=xt.device)
+                t = max(self.offset, 1.0 - self.offset - (i + 1) * h) * torch.ones(
+                    xt.shape[0], dtype=xt.dtype, device=xt.device
+                )
                 # Prepare all needed variables
                 sigma2_t = self.get_sigma2(t)
                 sigma2_s = self.get_sigma2(s)
@@ -480,37 +484,51 @@ class BridgeGAN(SDE, nn.Module):
                 xt = (alpha_t / alpha_s) * coeff * xs + alpha_t * (1 - coeff) * hat_x0
                 if i != self.N - 1:
                     eps = torch.randn(x1.shape, dtype=x1.dtype, device=x1.device, requires_grad=False)
-                    xt += alpha_t * torch.sqrt(sigma2_t * (1 - coeff)) * eps
+                    noise_scale = float(getattr(self, "noise_scale", 1.0))
+                    if noise_scale != 0.0:
+                        xt += alpha_t * torch.sqrt(sigma2_t * (1 - coeff)) * (noise_scale * eps)
 
             elif self.sampling_type.lower() == "ode_first_order":
                 # s -> t
                 s = (1.0 - self.offset - (i * h)) * torch.ones(xt.shape[0], dtype=xt.dtype, device=xt.device)
-                t = max(self.offset, 1.0 - self.offset - (i + 1) * h) * torch.ones(xt.shape[0], dtype=xt.dtype, device=xt.device)
+                t = max(self.offset, 1.0 - self.offset - (i + 1) * h) * torch.ones(
+                    xt.shape[0], dtype=xt.dtype, device=xt.device
+                )
                 # Prepare all needed variables
                 sigma2_t = self.get_sigma2(t)[:, None, None, None]
                 bar_sigma2_t = self.get_bar_sigma2(t)[:, None, None, None]
                 sigma2_s = self.get_sigma2(s)[:, None, None, None]
                 bar_sigma2_s = self.get_bar_sigma2(s)[:, None, None, None]
+                # Numerical guard: for bridge types like gmax, bar_sigma2 approaches 0 near t≈1.
+                # Without clamping, the ODE update can explode and produce severe banding artifacts.
+                eps = 1e-8
+                sigma2_t = torch.clamp(sigma2_t, min=eps)
+                sigma2_s = torch.clamp(sigma2_s, min=eps)
+                bar_sigma2_t = torch.clamp(bar_sigma2_t, min=eps)
+                bar_sigma2_s = torch.clamp(bar_sigma2_s, min=eps)
                 sigma_t = torch.sqrt(sigma2_t)
                 bar_sigma_t = torch.sqrt(bar_sigma2_t)
                 sigma_s = torch.sqrt(sigma2_s)
                 bar_sigma_s = torch.sqrt(bar_sigma2_s)
-                sigma2_1 = sigma2_t + bar_sigma2_t 
+                sigma2_1 = torch.clamp(sigma2_t + bar_sigma2_t, min=eps)
                 alpha_t = self.get_alpha(t)[:, None, None, None]
                 alpha_s = self.get_alpha(s)[:, None, None, None]
 
                 xs = xt
                 hat_x0 = self.data_estimation(xs, x1, cond, s, dnn)
 
-                xt = (alpha_t * sigma_t * bar_sigma_t) / (alpha_s * sigma_s * bar_sigma_s) * xs + alpha_t / sigma2_1 * ((bar_sigma2_t - (bar_sigma_s * sigma_t * bar_sigma_t) / (sigma_s)) * hat_x0 + (sigma2_t - (sigma_s * sigma_t * bar_sigma_t) / (bar_sigma_s)) * x1 / self.alpha_1)
-            
+                xt = (alpha_t * sigma_t * bar_sigma_t) / (alpha_s * sigma_s * bar_sigma_s) * xs + alpha_t / sigma2_1 * (
+                    (bar_sigma2_t - (bar_sigma_s * sigma_t * bar_sigma_t) / (sigma_s)) * hat_x0
+                    + (sigma2_t - (sigma_s * sigma_t * bar_sigma_t) / (bar_sigma_s)) * x1 / self.alpha_1
+                )
+
             else:
                 raise NotImplemented()
-            if to_cpu:
-                xt_traj.append(xt.detach().cpu())
-            else:
-                xt_traj.append(xt.detach())
-        
-        xt_traj = torch.stack(xt_traj, dim=1)
 
-        return xt_traj[:, -1]
+            if return_traj:
+                xt_traj.append(xt.detach().cpu() if to_cpu else xt.detach())
+
+        if return_traj:
+            return torch.stack(xt_traj, dim=1)
+
+        return xt.detach().cpu() if to_cpu else xt.detach()

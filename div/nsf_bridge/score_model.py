@@ -102,6 +102,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
         mel_phase_gate_ratio: float = 0.0,
         # BCD high-SR band mode (forwarded into BCD)
         highsr_band_mode: str = "legacy",
+        highsr_split_mode: str = "conv",
         highsr_freq_bins: int = 1024,
         highsr_coarse_stride_f: int = 16,
         highsr_refine8_start: int = 256,
@@ -188,6 +189,7 @@ class NsfBridgeScoreModel(pl.LightningModule):
             phase_mask_ratio=phase_mask_ratio,
             mel_phase_gate_ratio=mel_phase_gate_ratio,
             highsr_band_mode=highsr_band_mode,
+            highsr_split_mode=highsr_split_mode,
             highsr_freq_bins=highsr_freq_bins,
             highsr_coarse_stride_f=highsr_coarse_stride_f,
             highsr_refine8_start=highsr_refine8_start,

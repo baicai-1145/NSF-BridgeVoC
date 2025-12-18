@@ -143,6 +143,7 @@ def main():
         mel_phase_gate_ratio=model_cfg.get("mel_phase_gate_ratio", 0.0),
         # High-SR band mode (forwarded into BCD via NsfBcdBridge)
         highsr_band_mode=model_cfg.get("highsr_band_mode", "legacy"),
+        highsr_split_mode=model_cfg.get("highsr_split_mode", "conv"),
         highsr_freq_bins=model_cfg.get("highsr_freq_bins", 1024),
         highsr_coarse_stride_f=model_cfg.get("highsr_coarse_stride_f", 16),
         highsr_refine8_start=model_cfg.get("highsr_refine8_start", 256),

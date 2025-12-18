@@ -45,6 +45,9 @@ class BCD(nn.Module):
       parser.add_argument("--highsr_band_mode", type=str, required=False, default="legacy",
                           choices=["legacy", "full_uniform", "ms_16_8_4"],
                           help="High-SR band split/merge mode. legacy=12/24/44 hard split; full_uniform=full-band uniform stride; ms_16_8_4=full_uniform + refine branches.")
+      parser.add_argument("--highsr_split_mode", type=str, required=False, default="conv",
+                          choices=["conv", "repack"],
+                          help="For highsr_band_mode=full_uniform/ms_16_8_4, choose split/merge impl: conv=stride conv/convtranspose (legacy); repack=reversible pack/unpack (no frequency downsampling).")
       parser.add_argument("--highsr_freq_bins", type=int, required=False, default=1024,
                           help="Expected F bins after drop_last_freq for high SR (e.g. 1024 for n_fft=2048).")
       parser.add_argument("--highsr_coarse_stride_f", type=int, required=False, default=16,
@@ -79,6 +82,7 @@ class BCD(nn.Module):
                 causal: bool = False,
                 sampling_rate: int = 24000,
                 highsr_band_mode: str = "legacy",
+                highsr_split_mode: str = "conv",
                 highsr_freq_bins: int = 1024,
                 highsr_coarse_stride_f: int = 16,
                 highsr_refine8_start: int = 256,
@@ -106,6 +110,7 @@ class BCD(nn.Module):
       self.causal = causal
       self.sampling_rate = sampling_rate
       self.highsr_band_mode = str(highsr_band_mode).lower()
+      self.highsr_split_mode = str(highsr_split_mode).lower()
       self.highsr_freq_bins = int(highsr_freq_bins)
       self.highsr_coarse_stride_f = int(highsr_coarse_stride_f)
       self.highsr_refine8_start = int(highsr_refine8_start)
@@ -129,19 +134,34 @@ class BCD(nn.Module):
             self.use_refine = False
          elif self.highsr_band_mode in ["full_uniform", "ms_16_8_4"]:
             if self.highsr_freq_bins % self.highsr_coarse_stride_f != 0:
-               raise ValueError(f"highsr_freq_bins must be divisible by highsr_coarse_stride_f, got {self.highsr_freq_bins} / {self.highsr_coarse_stride_f}")
-            self.enc = SharedBandSplit_Uniform(freq_bins=self.highsr_freq_bins,
-                                               stride_f=self.highsr_coarse_stride_f,
-                                               input_channel=self.input_channel,
-                                               feature_dim=self.hidden_channel,
-                                               use_adanorm=self.use_adanorm,
-                                               causal=self.causal)
+               raise ValueError(
+                  f"highsr_freq_bins must be divisible by highsr_coarse_stride_f, "
+                  f"got {self.highsr_freq_bins} / {self.highsr_coarse_stride_f}"
+               )
+
+            if self.highsr_split_mode == "conv":
+               enc_cls, dec_cls = SharedBandSplit_Uniform, SharedBandMerge_Uniform
+            elif self.highsr_split_mode == "repack":
+               enc_cls, dec_cls = SharedBandSplit_Repack, SharedBandMerge_Repack
+            else:
+               raise ValueError(f"Unknown highsr_split_mode: {self.highsr_split_mode}")
+
+            self.enc = enc_cls(
+               freq_bins=self.highsr_freq_bins,
+               stride_f=self.highsr_coarse_stride_f,
+               input_channel=self.input_channel,
+               feature_dim=self.hidden_channel,
+               use_adanorm=self.use_adanorm,
+               causal=self.causal,
+            )
             self.nband = self.enc.get_nband()
-            self.dec = SharedBandMerge_Uniform(nband=self.nband,
-                                               stride_f=self.highsr_coarse_stride_f,
-                                               feature_dim=self.hidden_channel,
-                                               use_adanorm=self.use_adanorm,
-                                               decode_type=self.decode_type)
+            self.dec = dec_cls(
+               nband=self.nband,
+               stride_f=self.highsr_coarse_stride_f,
+               feature_dim=self.hidden_channel,
+               use_adanorm=self.use_adanorm,
+               decode_type=self.decode_type,
+            )
             self.use_refine = self.highsr_band_mode == "ms_16_8_4"
          else:
             raise ValueError(f"Unknown highsr_band_mode: {self.highsr_band_mode}")
@@ -189,17 +209,28 @@ class BCD(nn.Module):
          self.refine4_start = self.highsr_refine4_start
          self.refine4_end = refine4_end
 
-         self.refine8_enc = SharedBandSplit_Uniform(freq_bins=refine8_len,
-                                                    stride_f=refine8_stride_f,
-                                                    input_channel=self.input_channel,
-                                                    feature_dim=self.hidden_channel,
-                                                    use_adanorm=self.use_adanorm,
-                                                    causal=self.causal)
-         self.refine8_dec = SharedBandMerge_Uniform(nband=self.refine8_enc.get_nband(),
-                                                    stride_f=refine8_stride_f,
-                                                    feature_dim=self.hidden_channel,
-                                                    use_adanorm=self.use_adanorm,
-                                                    decode_type=self.decode_type)
+         if self.highsr_split_mode == "conv":
+            refine_enc_cls, refine_dec_cls = SharedBandSplit_Uniform, SharedBandMerge_Uniform
+         elif self.highsr_split_mode == "repack":
+            refine_enc_cls, refine_dec_cls = SharedBandSplit_Repack, SharedBandMerge_Repack
+         else:
+            raise ValueError(f"Unknown highsr_split_mode: {self.highsr_split_mode}")
+
+         self.refine8_enc = refine_enc_cls(
+            freq_bins=refine8_len,
+            stride_f=refine8_stride_f,
+            input_channel=self.input_channel,
+            feature_dim=self.hidden_channel,
+            use_adanorm=self.use_adanorm,
+            causal=self.causal,
+         )
+         self.refine8_dec = refine_dec_cls(
+            nband=self.refine8_enc.get_nband(),
+            stride_f=refine8_stride_f,
+            feature_dim=self.hidden_channel,
+            use_adanorm=self.use_adanorm,
+            decode_type=self.decode_type,
+         )
          self.refine8_net = Conv2FormerNet(nband=self.refine8_enc.get_nband(),
                                            nblocks=self.highsr_refine8_nblocks,
                                            input_channel=self.hidden_channel,
@@ -214,17 +245,21 @@ class BCD(nn.Module):
                                            causal=self.causal,
                                            use_adanorm=self.use_adanorm)
 
-         self.refine4_enc = SharedBandSplit_Uniform(freq_bins=refine4_len,
-                                                    stride_f=refine4_stride_f,
-                                                    input_channel=self.input_channel,
-                                                    feature_dim=self.hidden_channel,
-                                                    use_adanorm=self.use_adanorm,
-                                                    causal=self.causal)
-         self.refine4_dec = SharedBandMerge_Uniform(nband=self.refine4_enc.get_nband(),
-                                                    stride_f=refine4_stride_f,
-                                                    feature_dim=self.hidden_channel,
-                                                    use_adanorm=self.use_adanorm,
-                                                    decode_type=self.decode_type)
+         self.refine4_enc = refine_enc_cls(
+            freq_bins=refine4_len,
+            stride_f=refine4_stride_f,
+            input_channel=self.input_channel,
+            feature_dim=self.hidden_channel,
+            use_adanorm=self.use_adanorm,
+            causal=self.causal,
+         )
+         self.refine4_dec = refine_dec_cls(
+            nband=self.refine4_enc.get_nband(),
+            stride_f=refine4_stride_f,
+            feature_dim=self.hidden_channel,
+            use_adanorm=self.use_adanorm,
+            decode_type=self.decode_type,
+         )
          self.refine4_net = Conv2FormerNet(nband=self.refine4_enc.get_nband(),
                                            nblocks=self.highsr_refine4_nblocks,
                                            input_channel=self.hidden_channel,

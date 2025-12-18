@@ -578,6 +578,189 @@ class SharedBandSplit_Uniform(nn.Module):
       return out
 
 
+def _pack_freq_to_channel(x: torch.Tensor, *, stride_f: int) -> torch.Tensor:
+   """
+   Repack frequency bins into channel dimension without mixing.
+
+   x: (B, C, F, T)
+   return: (B, C*stride_f, F/stride_f, T)
+   """
+   if x.ndim != 4:
+      raise ValueError(f"Expected 4D input (B,C,F,T), got shape={tuple(x.shape)}")
+   if stride_f <= 0:
+      raise ValueError(f"stride_f must be positive, got {stride_f}")
+   B, C, F, T = x.shape
+   if F % stride_f != 0:
+      raise ValueError(f"F must be divisible by stride_f, got F={F}, stride_f={stride_f}")
+   nband = F // stride_f
+   x = x.contiguous().view(B, C, nband, stride_f, T)
+   x = x.permute(0, 1, 3, 2, 4).contiguous().view(B, C * stride_f, nband, T)
+   return x
+
+
+def _unpack_channel_to_freq(x: torch.Tensor, *, stride_f: int, channels_per_bin: int) -> torch.Tensor:
+   """
+   Inverse of _pack_freq_to_channel for grouped channels.
+
+   x: (B, channels_per_bin*stride_f, nband, T)
+   return: (B, channels_per_bin, nband*stride_f, T)
+   """
+   if x.ndim != 4:
+      raise ValueError(f"Expected 4D input (B,C,nband,T), got shape={tuple(x.shape)}")
+   if stride_f <= 0:
+      raise ValueError(f"stride_f must be positive, got {stride_f}")
+   if channels_per_bin <= 0:
+      raise ValueError(f"channels_per_bin must be positive, got {channels_per_bin}")
+   B, C, nband, T = x.shape
+   expected = channels_per_bin * stride_f
+   if C != expected:
+      raise ValueError(f"Expected C={expected} (=channels_per_bin*stride_f), got C={C}")
+   x = x.contiguous().view(B, channels_per_bin, stride_f, nband, T)
+   x = x.permute(0, 1, 3, 2, 4).contiguous().view(B, channels_per_bin, nband * stride_f, T)
+   return x
+
+
+class SharedBandSplit_Repack(nn.Module):
+   def __init__(
+      self,
+      freq_bins: int,
+      stride_f: int,
+      input_channel: int = 4,
+      feature_dim: int = 64,
+      use_adanorm: bool = False,
+      causal: bool = True,
+   ):
+      super(SharedBandSplit_Repack, self).__init__()
+      if freq_bins % stride_f != 0:
+         raise ValueError(f"freq_bins must be divisible by stride_f, got freq_bins={freq_bins}, stride_f={stride_f}")
+
+      self.freq_bins = int(freq_bins)
+      self.stride_f = int(stride_f)
+      self.input_channel = int(input_channel)
+      self.feature_dim = int(feature_dim)
+      self.use_adanorm = bool(use_adanorm)
+      self.causal = bool(causal)
+      self.eps = torch.finfo(torch.float32).eps
+
+      if self.causal:
+         pad = nn.ConstantPad2d([2, 0, 0, 0], value=0.)
+      else:
+         pad = nn.ConstantPad2d([1, 1, 0, 0], value=0.)
+
+      nband = self.freq_bins // self.stride_f
+      # Only do time-mixing projection; frequency bins are repacked, not downsampled.
+      self.reg_encoder = nn.Sequential(
+         pad,
+         nn.Conv2d(
+            in_channels=self.input_channel * self.stride_f,
+            out_channels=self.feature_dim,
+            kernel_size=(1, 3),
+            stride=(1, 1),
+         ),
+         BandwiseC2LayerNorm(nband=nband, feature_dim=self.feature_dim),
+      )
+      self.nband = int(nband)
+
+   def get_nband(self):
+      return self.nband
+
+   def forward(self, input=None, time_ada_begin=None):
+      """
+      input: (B, 4, F, T)
+      return: (B, C, nband, T)
+      """
+      batch_size = input.shape[0]
+      if input.shape[-2] != self.freq_bins:
+         raise ValueError(f"Expected F={self.freq_bins}, got F={input.shape[-2]}")
+      packed = _pack_freq_to_channel(input, stride_f=self.stride_f)  # (B, 4*s, nband, T)
+      out = self.reg_encoder(packed)
+      if self.use_adanorm:
+         shift, scale = time_ada_begin.reshape(batch_size, 2, -1).chunk(2, dim=1)
+         shift, scale = shift.squeeze(1), scale.squeeze(1)
+         out = film_modulate(out, shift, scale)
+      return out
+
+
+class SharedBandMerge_Repack(nn.Module):
+   def __init__(
+      self,
+      nband: int,
+      stride_f: int,
+      feature_dim: int = 64,
+      use_adanorm: bool = False,
+      decode_type: str = 'mag+phase',
+   ):
+      super(SharedBandMerge_Repack, self).__init__()
+      self.nband = int(nband)
+      self.stride_f = int(stride_f)
+      self.feature_dim = int(feature_dim)
+      self.use_adanorm = bool(use_adanorm)
+      self.decode_type = str(decode_type)
+      self.eps = torch.finfo(torch.float32).eps
+
+      self.norm1 = BandwiseC2LayerNorm(nband=self.nband, feature_dim=self.feature_dim)
+      self.norm2 = BandwiseC2LayerNorm(nband=self.nband, feature_dim=self.feature_dim)
+
+      if self.decode_type.lower() == "mag+phase":
+         self.mag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.Conv2d(in_channels=self.feature_dim * 2, out_channels=self.stride_f, kernel_size=(1, 1)),
+         )
+         self.phase_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.Conv2d(in_channels=self.feature_dim * 2, out_channels=2 * self.stride_f, kernel_size=(1, 1)),
+         )
+      elif self.decode_type.lower() == "ri":
+         self.real_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.Conv2d(in_channels=self.feature_dim * 2, out_channels=self.stride_f, kernel_size=(1, 1)),
+         )
+         self.imag_decoder = nn.Sequential(
+            nn.Conv2d(in_channels=self.feature_dim, out_channels=self.feature_dim * 2, kernel_size=(1, 1)),
+            nn.GELU(),
+            nn.Conv2d(in_channels=self.feature_dim * 2, out_channels=self.stride_f, kernel_size=(1, 1)),
+         )
+      else:
+         raise NotImplementedError("Only Mag+Phase and RI are supported for decoding!")
+
+   def forward(self, emb_input, time_ada_final1=None, time_ada_final2=None):
+      """
+      emb_input: (B, C, nband, T)
+      return:
+         mag: (B, F, T), phase: (B, F, T)   (mag+phase)
+         real: (B, 1, F, T), imag: (B, 1, F, T)  (ri)
+      """
+      batch_size = emb_input.shape[0]
+      emb_input1, emb_input2 = self.norm1(emb_input), self.norm2(emb_input)
+
+      if self.use_adanorm:
+         shift1, scale1 = time_ada_final1.reshape(batch_size, 2, -1).chunk(2, dim=1)
+         shift1, scale1 = shift1.squeeze(1), scale1.squeeze(1)
+         emb_input1 = film_modulate(emb_input1, shift1, scale1)
+         shift2, scale2 = time_ada_final2.reshape(batch_size, 2, -1).chunk(2, dim=1)
+         shift2, scale2 = shift2.squeeze(1), scale2.squeeze(1)
+         emb_input2 = film_modulate(emb_input2, shift2, scale2)
+
+      if self.decode_type.lower() == "mag+phase":
+         mag_packed = self.mag_decoder(emb_input1)  # (B, s, nband, T)
+         com_packed = self.phase_decoder(emb_input2)  # (B, 2*s, nband, T)
+         mag = _unpack_channel_to_freq(mag_packed, stride_f=self.stride_f, channels_per_bin=1)  # (B,1,F,T)
+         com = _unpack_channel_to_freq(com_packed, stride_f=self.stride_f, channels_per_bin=2)  # (B,2,F,T)
+         pha = torch.atan2(com[:, -1], com[:, 0])
+         return torch.exp(mag.squeeze(1)), pha
+      elif self.decode_type.lower() == "ri":
+         real_packed = self.real_decoder(emb_input1)  # (B, s, nband, T)
+         imag_packed = self.imag_decoder(emb_input2)  # (B, s, nband, T)
+         real = _unpack_channel_to_freq(real_packed, stride_f=self.stride_f, channels_per_bin=1)  # (B,1,F,T)
+         imag = _unpack_channel_to_freq(imag_packed, stride_f=self.stride_f, channels_per_bin=1)  # (B,1,F,T)
+         return real, imag
+      else:
+         raise NotImplementedError("Only mag+phase and ri are supported, please check it carefully!")
+
+
 class SharedBandMerge_Uniform(nn.Module):
    def __init__(self,
                 nband: int,

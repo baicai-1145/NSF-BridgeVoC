@@ -110,6 +110,13 @@ class NsfBridgeScoreModel(pl.LightningModule):
         highsr_refine_overlap: int = 64,
         highsr_refine8_nblocks: int = 4,
         highsr_refine4_nblocks: int = 2,
+        # T5.8: mel2mag cond (train/infer一致)
+        cond_mag_source: str = "inverse_mel",  # inverse_mel|mel2mag
+        mel2mag_ckpt: str | None = None,
+        mel2mag_weight: float = 0.0,
+        mel2mag_ramp_steps: int = 0,
+        mel2mag_freeze: bool = True,
+        mel2mag_lr_scale: float = 1.0,
     ):
         super().__init__()
 
@@ -188,6 +195,10 @@ class NsfBridgeScoreModel(pl.LightningModule):
             voiced_threshold=voiced_threshold,
             phase_mask_ratio=phase_mask_ratio,
             mel_phase_gate_ratio=mel_phase_gate_ratio,
+            cond_mag_source=cond_mag_source,
+            mel2mag_ckpt=mel2mag_ckpt,
+            mel2mag_weight=mel2mag_weight,
+            mel2mag_freeze=mel2mag_freeze,
             highsr_band_mode=highsr_band_mode,
             highsr_split_mode=highsr_split_mode,
             highsr_freq_bins=highsr_freq_bins,
@@ -210,6 +221,12 @@ class NsfBridgeScoreModel(pl.LightningModule):
         self.lr_eta_min = float(lr_eta_min)
         self.lr_tmax_steps = int(lr_tmax_steps)
         self.num_eval_files = num_eval_files
+        self.cond_mag_source = str(cond_mag_source).lower()
+        self.mel2mag_ckpt = mel2mag_ckpt
+        self.mel2mag_weight = float(mel2mag_weight)
+        self.mel2mag_ramp_steps = int(mel2mag_ramp_steps)
+        self.mel2mag_freeze = bool(mel2mag_freeze)
+        self.mel2mag_lr_scale = float(mel2mag_lr_scale)
 
         if self.use_gan:
             self.mpd = MultiPeriodDiscriminator()
@@ -266,14 +283,23 @@ class NsfBridgeScoreModel(pl.LightningModule):
 
     # ----------------- Optim / EMA -----------------
     def configure_optimizers(self):
-        if self.opt_type.lower() == "adam":
-            optimizer = torch.optim.Adam(
-                self.dnn.parameters(), lr=self.lr, betas=(self.beta1, self.beta2)
-            )
+        # Optional: separate lr for mel2mag when trainable (T5.8 stage-2)
+        if getattr(self, "mel2mag_freeze", True):
+            params = list(self.dnn.parameters())
         else:
-            optimizer = torch.optim.AdamW(
-                self.dnn.parameters(), lr=self.lr, betas=(self.beta1, self.beta2)
-            )
+            mel2mag = getattr(self.dnn, "mel2mag", None)
+            mel2mag_params = list(mel2mag.parameters()) if mel2mag is not None else []
+            mel2mag_ids = {id(p) for p in mel2mag_params}
+            other_params = [p for p in self.dnn.parameters() if id(p) not in mel2mag_ids]
+            params = [
+                {"params": other_params, "lr": float(self.lr)},
+                {"params": mel2mag_params, "lr": float(self.lr) * float(getattr(self, "mel2mag_lr_scale", 1.0))},
+            ]
+
+        if self.opt_type.lower() == "adam":
+            optimizer = torch.optim.Adam(params, lr=self.lr, betas=(self.beta1, self.beta2))
+        else:
+            optimizer = torch.optim.AdamW(params, lr=self.lr, betas=(self.beta1, self.beta2))
         if self.lr_scheduler_interval == "step":
             if self.lr_tmax_steps > 0:
                 t_max = self.lr_tmax_steps
@@ -491,10 +517,20 @@ class NsfBridgeScoreModel(pl.LightningModule):
         x_spec = self._spec_fwd(x_spec)
         x_ri = torch.stack([x_spec.real, x_spec.imag], dim=1)  # (B, 2, F, T)
 
-        # 2) 条件谱 Y：由 mel + F0 通过 NSF 源 + BCD 前端构造
+        # 2) 条件谱 Y：由 mel + F0 通过 NSF 源 + (inverse_mel/mel2mag) 构造
+        w = float(getattr(self, "mel2mag_weight", 0.0))
+        if int(getattr(self, "mel2mag_ramp_steps", 0)) > 0:
+            ramp = float(min(1.0, float(self.global_step) / float(self.mel2mag_ramp_steps)))
+            w = w * ramp
+        try:
+            self.dnn.set_mel2mag_weight(w)
+        except Exception:
+            pass
         cond_full_ri = self.dnn.build_cond(mel, f0)  # (B, 2, F_full, T)
         if self.drop_last_freq:
-            cond_full_ri = cond_full_ri[:, :, :-1].contiguous()
+            # Accept both full-F and already-drop_last-F outputs (for robustness).
+            if int(cond_full_ri.shape[-2]) == int(self.n_fft // 2 + 1):
+                cond_full_ri = cond_full_ri[:, :, :-1].contiguous()
 
         cond_spec = torch.complex(cond_full_ri[:, 0], cond_full_ri[:, 1])  # (B, F, T) or (B, F-1, T)
         cond_spec = self._spec_fwd(cond_spec)

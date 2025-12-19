@@ -4,12 +4,18 @@
 import argparse
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import soundfile as sf
 import torch
+
+# Ensure repo root is on sys.path when running as a script: `python tools/eval_mel2mag.py ...`
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from div.nsf.f0_utils import extract_f0_fcpe
 from div.nsf_bridge.mel2mag import Mel2MagConfig, Mel2MagHF
@@ -446,4 +452,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

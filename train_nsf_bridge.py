@@ -151,6 +151,13 @@ def main():
         highsr_refine_overlap=model_cfg.get("highsr_refine_overlap", 64),
         highsr_refine8_nblocks=model_cfg.get("highsr_refine8_nblocks", 4),
         highsr_refine4_nblocks=model_cfg.get("highsr_refine4_nblocks", 2),
+        # T5.8: mel2mag cond
+        cond_mag_source=model_cfg.get("cond_mag_source", "inverse_mel"),
+        mel2mag_ckpt=model_cfg.get("mel2mag_ckpt", None),
+        mel2mag_weight=model_cfg.get("mel2mag_weight", 0.0),
+        mel2mag_ramp_steps=model_cfg.get("mel2mag_ramp_steps", 0),
+        mel2mag_freeze=model_cfg.get("mel2mag_freeze", True),
+        mel2mag_lr_scale=model_cfg.get("mel2mag_lr_scale", 1.0),
     )
 
     # 可选：仅加载权重（不恢复 optim/scheduler），并支持自动忽略 shape mismatch

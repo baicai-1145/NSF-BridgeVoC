@@ -8,6 +8,7 @@ from .shared import BackboneRegistry
 from .bcd import BCD
 from div.data_module import inverse_mel, mel_spectrogram
 from div.nsf.nsf_hifigan import SourceModuleHnNSF
+from div.nsf_bridge.mel2mag import Mel2MagConfig, Mel2MagHF
 
 
 @BackboneRegistry.register("bcd_nsf_bridge")
@@ -97,6 +98,17 @@ class NsfBcdBridge(nn.Module):
         voiced_threshold: float = 0.0,
         phase_mask_ratio: float = 0.1,
         mel_phase_gate_ratio: float = 0.0,
+        # Mel2Mag (optional, for T5.8)
+        cond_mag_source: str = "inverse_mel",  # inverse_mel|mel2mag
+        mel2mag_ckpt: str | None = None,
+        mel2mag_weight: float = 0.0,  # mixed: mag=(1-w)*inv + w*hat
+        mel2mag_hidden: int = 256,
+        mel2mag_n_blocks: int = 6,
+        mel2mag_kernel_size: int = 5,
+        mel2mag_dropout: float = 0.0,
+        mel2mag_f0_max: float = 1100.0,
+        mel2mag_eps: float = 1e-6,
+        mel2mag_freeze: bool = True,
         **unused_kwargs: Any,
     ):
         super().__init__()
@@ -121,6 +133,28 @@ class NsfBcdBridge(nn.Module):
         self.voiced_threshold = voiced_threshold
         self.phase_mask_ratio = float(phase_mask_ratio)
         self.mel_phase_gate_ratio = float(mel_phase_gate_ratio)
+
+        self.cond_mag_source = str(cond_mag_source).lower()
+        self.mel2mag_weight = float(mel2mag_weight)
+
+        # Mel2MagHF: mel(+f0/uv) -> linear STFT magnitude (optionally loaded from a Lightning ckpt)
+        n_freq = int(self.n_fft // 2 + 1)  # build_cond works in full STFT bins (before drop_last_freq)
+        cfg = Mel2MagConfig(
+            num_mels=int(self.num_mels),
+            n_freq=n_freq,
+            hidden=int(mel2mag_hidden),
+            n_blocks=int(mel2mag_n_blocks),
+            kernel_size=int(mel2mag_kernel_size),
+            dropout=float(mel2mag_dropout),
+            f0_max=float(mel2mag_f0_max),
+            eps=float(mel2mag_eps),
+        )
+        self.mel2mag = Mel2MagHF(cfg)
+        if mel2mag_ckpt:
+            self.load_mel2mag_ckpt(str(mel2mag_ckpt), strict=False)
+        if bool(mel2mag_freeze):
+            for p in self.mel2mag.parameters():
+                p.requires_grad = False
 
         # BCD 子带网络作为 STFT 域解码器（结构与 bridge-only 完全一致）
         self.bcd = BCD(
@@ -147,6 +181,36 @@ class NsfBcdBridge(nn.Module):
         self.register_buffer(
             "stft_window", torch.hann_window(self.win_size), persistent=False
         )
+
+    def load_mel2mag_ckpt(self, ckpt_path: str, *, strict: bool = False) -> dict:
+        """
+        Load Mel2MagHF weights from a Mel2MagLightning checkpoint.
+        Returns a small report dict for logging/debugging.
+        """
+        import os
+
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"mel2mag_ckpt not found: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        state = ckpt.get("state_dict", ckpt)
+        if not isinstance(state, dict):
+            raise ValueError("Invalid mel2mag ckpt: missing state_dict")
+        filtered = {}
+        for k, v in state.items():
+            if k.startswith("mel2mag."):
+                filtered[k[len("mel2mag.") :]] = v
+            elif k in self.mel2mag.state_dict():
+                filtered[k] = v
+        missing, unexpected = self.mel2mag.load_state_dict(filtered, strict=strict)
+        return {
+            "ckpt_path": os.path.abspath(ckpt_path),
+            "loaded": int(len(filtered)),
+            "missing": list(missing),
+            "unexpected": list(unexpected),
+        }
+
+    def set_mel2mag_weight(self, w: float):
+        self.mel2mag_weight = float(w)
 
     def _stft(self, wav: torch.Tensor) -> torch.Tensor:
         """
@@ -183,19 +247,47 @@ class NsfBcdBridge(nn.Module):
         mag_src = spec_src.abs()
         pha_src = torch.angle(spec_src)
 
-        # 3) 由 mel 近似恢复幅度谱
-        # mel 本身已经是 log-mel，inverse_mel 内部会做 exp 反变换
-        mag_mel = inverse_mel(
-            mel,
-            n_fft=self.n_fft,
-            num_mels=self.num_mels,
-            sampling_rate=self.sampling_rate,
-            hop_size=self.hop_size,
-            win_size=self.win_size,
-            fmin=self.fmin,
-            fmax=self.fmax,
-            in_dataset=False,
-        ).abs().clamp_min_(1e-6)  # (B, F, T_mel)
+        # 3) cond 幅度谱：inverse_mel(pinverse) 与 Mel2MagHF 的可回退/可混合实现
+        # mel 本身已经是 log-mel；inverse_mel 内部会做 exp 反变换
+        w = float(self.mel2mag_weight)
+        w = max(0.0, min(1.0, w))
+        use_hat = (self.cond_mag_source == "mel2mag") or (w > 0.0)
+        use_inv = (self.cond_mag_source == "inverse_mel") or (w < 1.0)
+
+        mag_inv = None
+        mag_hat = None
+        if use_inv:
+            mag_inv = inverse_mel(
+                mel,
+                n_fft=self.n_fft,
+                num_mels=self.num_mels,
+                sampling_rate=self.sampling_rate,
+                hop_size=self.hop_size,
+                win_size=self.win_size,
+                fmin=self.fmin,
+                fmax=self.fmax,
+                in_dataset=False,
+            ).abs().clamp_min_(1e-6)  # (B, F_full, T_mel)
+        if use_hat:
+            uv = (f0 > self.voiced_threshold).to(mel.dtype)
+            mag_hat = self.mel2mag(mel, f0, uv).clamp_min(1e-6)  # (B, F_?, T)
+            # If mel2mag was trained with drop_last_freq, pad the last bin (Nyquist) with zeros.
+            if mag_hat.shape[-2] == (mag_src.shape[-2] - 1):
+                last = torch.zeros_like(mag_hat[:, :1, :]).contiguous()
+                mag_hat = torch.cat([mag_hat, last], dim=-2)
+
+        if mag_inv is None and mag_hat is None:
+            raise ValueError(f"Invalid cond_mag_source: {self.cond_mag_source}")
+        if mag_inv is None:
+            mag_mel = mag_hat
+        elif mag_hat is None:
+            mag_mel = mag_inv
+        else:
+            # Align time dims first, then mix
+            Tm = min(int(mag_inv.shape[-1]), int(mag_hat.shape[-1]))
+            mag_inv = mag_inv[..., :Tm]
+            mag_hat = mag_hat[..., :Tm]
+            mag_mel = (1.0 - w) * mag_inv + w * mag_hat
 
         # 4) 对齐时间维度（通常 T_src ≈ T_mel）
         # 同时考虑 F0/uv 的长度，避免后续 mask 在时间维上 mismatch。

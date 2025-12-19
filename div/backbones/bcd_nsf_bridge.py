@@ -201,10 +201,50 @@ class NsfBcdBridge(nn.Module):
                 filtered[k[len("mel2mag.") :]] = v
             elif k in self.mel2mag.state_dict():
                 filtered[k] = v
+
+        # Compatibility: mel2mag might be trained with drop_last_freq=True (F=n_fft//2),
+        # while build_cond expects full F (n_fft//2+1). In this case, pad the last bin's
+        # projection row (Nyquist) with zeros during weight loading.
+        padded = False
+        try:
+            cur_state = self.mel2mag.state_dict()
+            w_key = "out_proj.weight"
+            b_key = "out_proj.bias"
+            if w_key in filtered and w_key in cur_state:
+                w_src = filtered[w_key]
+                w_dst = cur_state[w_key]
+                if (
+                    hasattr(w_src, "shape")
+                    and hasattr(w_dst, "shape")
+                    and int(w_src.shape[0]) + 1 == int(w_dst.shape[0])
+                    and tuple(w_src.shape[1:]) == tuple(w_dst.shape[1:])
+                ):
+                    w_pad = w_dst.clone()
+                    w_pad.zero_()
+                    w_pad[: w_src.shape[0]].copy_(w_src)
+                    filtered[w_key] = w_pad
+                    padded = True
+            if b_key in filtered and b_key in cur_state:
+                b_src = filtered[b_key]
+                b_dst = cur_state[b_key]
+                if (
+                    hasattr(b_src, "shape")
+                    and hasattr(b_dst, "shape")
+                    and int(b_src.shape[0]) + 1 == int(b_dst.shape[0])
+                ):
+                    b_pad = b_dst.clone()
+                    b_pad.zero_()
+                    b_pad[: b_src.shape[0]].copy_(b_src)
+                    filtered[b_key] = b_pad
+                    padded = True
+        except Exception:
+            padded = False
+
         missing, unexpected = self.mel2mag.load_state_dict(filtered, strict=strict)
         return {
             "ckpt_path": os.path.abspath(ckpt_path),
             "loaded": int(len(filtered)),
+            "padded_last_bin": bool(padded),
             "missing": list(missing),
             "unexpected": list(unexpected),
         }
